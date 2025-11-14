@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base href="$FLUTTER_BASE_HREF">
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <title>face_recognition_app</title>
+  <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js" crossorigin="anonymous"></script>
+  
+  <script>
+    var areModelsLoaded = false;
+    var detectionInterval;
+
+    // --- HÀM STARTCAMERA ĐÃ ĐƯỢC NÂNG CẤP ĐỂ ĐỢI ELEMENT ---
+    function startCamera(videoElementId, onFaceDetected, onBlinkDetected) { // Thêm 2 tham số callback
+      return new Promise((resolve, reject) => {
+        let videoElement;
+        const checkInterval = setInterval(async () => {
+          videoElement = document.getElementById(videoElementId);
+          
+          if (videoElement) {
+            clearInterval(checkInterval);
+            try {
+              const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+              videoElement.srcObject = stream;
+              // Sự kiện 'onplaying' là đáng tin cậy nhất
+              videoElement.onplaying = () => { 
+                  console.log("Camera đã khởi động và đang phát thành công.");
+                  // TỰ ĐỘNG GỌI NHẬN DIỆN TẠI ĐÂY
+                  startRealtimeDetection(videoElement, onFaceDetected, onBlinkDetected);
+                  resolve(true); // Báo về cho Dart là đã thành công
+              };
+              videoElement.play(); // Vẫn cần lệnh play cho iOS
+            } catch(e) {
+              console.error("Lỗi khi khởi động camera:", e);
+              resolve(false);
+            }
+          } else if (attempts > maxAttempts) {
+            clearInterval(checkInterval);
+            console.error("Không tìm thấy video element với ID:", videoElementId, "sau 2.5 giây.");
+            resolve(false);
+          }
+        }, 50); // Kiểm tra lại mỗi 50 mili giây
+      });
+    }
+
+    async function loadModels() {
+        if (areModelsLoaded) return true;
+        const modelPath = 'weights'; 
+        console.log("Đang tải các model TỐI ƯU HÓA (Tiny) từ thư mục cục bộ...");
+        try {
+            await faceapi.tf.setBackend('webgl');
+            await Promise.all([
+                faceapi.loadTinyFaceDetectorModel(modelPath),
+                faceapi.loadFaceLandmarkModel(modelPath),
+                faceapi.loadFaceRecognitionModel(modelPath)
+            ]);
+            console.log("Các model đã sẵn sàng (từ cục bộ).");
+            areModelsLoaded = true;
+            return true;
+        } catch (error) {
+            console.error("Lỗi khi tải model cục bộ:", error);
+            return false;
+        }
+    }
+
+    const EYE_AR_THRESH = 0.25;
+    const EYE_AR_CONSEC_FRAMES = 1;
+    let blinkCounter = 0;
+
+    function startRealtimeDetection(videoElement, onFaceDetected, onBlinkDetected) {
+      if (!areModelsLoaded || detectionInterval) return;
+      
+      blinkCounter = 0;
+      console.log("Bắt đầu dò tìm khuôn mặt và chớp mắt...");
+      detectionInterval = setInterval(async () => {
+        const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 });
+        const detection = await faceapi.detectSingleFace(videoElement, options).withFaceLandmarks();
+        
+        if (detection) {
+          if (onFaceDetected) onFaceDetected({ x: detection.detection.box.x, y: detection.detection.box.y, width: detection.detection.box.width, height: detection.detection.box.height });
+
+          const leftEye = detection.landmarks.getLeftEye();
+          const rightEye = detection.landmarks.getRightEye();
+          const ear = (getEAR(leftEye) + getEAR(rightEye)) / 2.0;
+
+          if (ear < EYE_AR_THRESH) {
+            blinkCounter++;
+          } else {
+            if (blinkCounter >= EYE_AR_CONSEC_FRAMES) {
+              if (onBlinkDetected) onBlinkDetected();
+            }
+            blinkCounter = 0;
+          }
+        } else {
+          if (onFaceDetected) onFaceDetected(null);
+        }
+      }, 100);
+    }
+
+    function getEAR(eye) {
+        function euclideanDist(p1, p2) {
+            return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+        }
+        const A = euclideanDist(eye[1], eye[5]);
+        const B = euclideanDist(eye[2], eye[4]);
+        const C = euclideanDist(eye[0], eye[3]);
+        return (A + B) / (2.0 * C);
+    }
+
+    function stopRealtimeDetection() {
+      if (detectionInterval) {
+        clearInterval(detectionInterval);
+        detectionInterval = null;
+        console.log("Đã dừng dò tìm khuôn mặt.");
+      }
+    }
+    
+    async function getFaceDescriptor(canvas, onResult) {
+      if (!areModelsLoaded) { onResult(null); return; }
+      try {
+        const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 });
+        const detection = await faceapi.detectSingleFace(canvas, options)
+                                       .withFaceLandmarks()
+                                       .withFaceDescriptor();
+        if (detection) {
+          onResult(detection.descriptor);
+        } else {
+          onResult(null);
+        }
+      } catch (error) {
+        console.error("Lỗi khi tạo descriptor:", error);
+        onResult(null);
+      }
+    }
+
+    function closeWindow() {
+        window.close();
+    }
+  </script>
+  
+</head>
+<body>
+  <video class="input_video" id="input_video" autoplay muted playsinline="true" webkit-playsinline="true" style="display: none; width: 480px; height: 360px;"></video>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>
