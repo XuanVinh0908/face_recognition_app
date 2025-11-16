@@ -7,6 +7,10 @@ import 'package:js/js_util.dart' as jsutil;
 import 'models.dart';
 import 'api_service.dart';
 
+// *** THÊM LẠI HÀM loadModels ***
+@JS()
+external Future<bool> loadModels();
+
 @JS()
 external Future<bool> startCamera(String videoElementId, Function onFaceDetected, Function onBlinkDetected);
 @JS()
@@ -37,6 +41,9 @@ class _RegistrationPageState extends State<RegistrationPage> {
   html.ImageElement? _uploadedImage;
   bool _isCameraInitialized = false;
 
+  // *** THÊM BIẾN TRẠNG THÁI TẢI MODEL ***
+  bool _areModelsLoaded = false;
+
   @override
   void initState() {
     super.initState();
@@ -58,14 +65,46 @@ class _RegistrationPageState extends State<RegistrationPage> {
     super.dispose();
   }
 
+  // *** TẠO HÀM ĐẢM BẢO MODEL ĐÃ TẢI ***
+  Future<bool> _ensureModelsLoaded() async {
+    if (_areModelsLoaded) return true; // Nếu đã tải rồi, trả về true
+    
+    setState(() {
+      _isProcessing = true;
+      _status = 'Đang tải model nhận dạng...';
+    });
+    await Future.delayed(const Duration(milliseconds: 50)); // Cho UI cập nhật
+
+    _areModelsLoaded = await loadModels();
+    if (!mounted) return false;
+
+    if (!_areModelsLoaded) {
+      setState(() {
+        _status = 'Lỗi! Không thể tải model nhận dạng.';
+        _isProcessing = false;
+      });
+      return false;
+    }
+    
+    // Tải xong, nhưng vẫn giữ _isProcessing = true
+    // để hàm gọi nó tiếp tục logic
+    return true;
+  }
+
   Future<void> _setMode(bool useCamera) async {
     if (_isProcessing) return;
-    
+
+    // *** GỌI HÀM KIỂM TRA MODEL TRƯỚC ***
+    final modelsLoaded = await _ensureModelsLoaded();
+    if (!modelsLoaded) return; // Nếu tải lỗi, dừng lại
+
+    // Model đã sẵn sàng, tiếp tục logic cũ
     setState(() {
       _showCamera = useCamera;
       _uploadedImageBase64 = null;
       _uploadedImage = null;
       _status = useCamera ? 'Đang khởi tạo camera...' : 'Vui lòng chọn ảnh từ thư viện...';
+      _isProcessing = false; // Mở khóa UI để chuẩn bị cho bước tiếp theo
     });
 
     if (useCamera) {
@@ -82,6 +121,8 @@ class _RegistrationPageState extends State<RegistrationPage> {
        setState(() => _status = 'Vui lòng giữ nguyên khuôn mặt trong khung hình...');
        return;
     }
+    
+    // Không cần tải model ở đây nữa vì _setMode đã làm
 
     final onFaceDetected = jsutil.allowInterop((dynamic result) {
       if (!mounted || _isProcessing || !_showCamera) return;
@@ -105,6 +146,13 @@ class _RegistrationPageState extends State<RegistrationPage> {
 
   Future<void> _pickImage() async {
     if (_isProcessing) return;
+
+    // *** GỌI HÀM KIỂM TRA MODEL TRƯỚC ***
+    final modelsLoaded = await _ensureModelsLoaded();
+    if (!modelsLoaded) return; // Nếu tải lỗi, dừng lại
+    
+    // Model đã sẵn sàng, mở khóa UI và tiếp tục
+    setState(() => _isProcessing = false);
 
     final html.FileUploadInputElement uploadInput = html.FileUploadInputElement();
     uploadInput.accept = 'image/*';
@@ -138,6 +186,7 @@ class _RegistrationPageState extends State<RegistrationPage> {
       _status = "Đã tìm thấy khuôn mặt. Đang xử lý...";
     });
     
+    // Model chắc chắn đã được tải
     await _handleFaceProcessing(_videoElement, isCamera: true);
   }
 
@@ -151,6 +200,7 @@ class _RegistrationPageState extends State<RegistrationPage> {
       _status = "Đang xử lý ảnh tải lên...";
     });
 
+    // Model chắc chắn đã được tải
     await _handleFaceProcessing(_uploadedImage!, isCamera: false);
   }
 
@@ -218,9 +268,8 @@ class _RegistrationPageState extends State<RegistrationPage> {
               // --- THANH CHỌN CHẾ ĐỘ ---
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                // *** THAY ĐỔI: ĐỔI TỪ ROW SANG COLUMN ***
                 child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch, // Cho các nút rộng ra
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     ElevatedButton.icon(
                       icon: const Icon(Icons.camera_alt),
@@ -231,7 +280,7 @@ class _RegistrationPageState extends State<RegistrationPage> {
                         padding: const EdgeInsets.symmetric(vertical: 12),
                       ),
                     ),
-                    const SizedBox(height: 12), // Đổi từ SizedBox(width: 16)
+                    const SizedBox(height: 12),
                     ElevatedButton.icon(
                       icon: const Icon(Icons.photo_library),
                       label: const Text('Tải Ảnh Lên'),
@@ -245,7 +294,7 @@ class _RegistrationPageState extends State<RegistrationPage> {
                 ),
               ),
               
-              const SizedBox(height: 16), // Thêm khoảng cách
+              const SizedBox(height: 16),
 
               // --- KHUNG HIỂN THỊ (CAMERA HOẶC ẢNH) ---
               if (_showCamera)
