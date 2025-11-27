@@ -195,12 +195,36 @@ class _VerificationPageState extends State<VerificationPage> {
   }
 
   void _captureFrame() {
-    if (_isSuccess) return; 
-    final canvas = html.CanvasElement(width: _processingWidth.toInt(), height: _processingHeight.toInt());
+    if (_isSuccess) return;
+    
+    final num w = _processingWidth;
+    final num h = _processingHeight;
+    
+    final canvas = html.CanvasElement(width: w.toInt(), height: h.toInt());
     final ctx = canvas.getContext('2d') as html.CanvasRenderingContext2D;
-    ctx.translate(_processingWidth, 0);
+
+    // 1. Thiết lập lật gương (Giống CSS của video)
+    ctx.translate(w, 0);
     ctx.scale(-1, 1);
-    ctx.drawImageScaled(_videoElement, 0, 0, _processingWidth, _processingHeight);
+
+    // 2. Tính toán tỉ lệ để phủ kín (Cover Logic)
+    final num vw = _videoElement.videoWidth;
+    final num vh = _videoElement.videoHeight;
+    
+    // Tỉ lệ scale cần thiết để lấp đầy canvas (lấy chiều lớn hơn)
+    final double scale = max(w / vw, h / vh);
+    
+    // Kích thước sau khi scale
+    final double drawnW = vw * scale;
+    final double drawnH = vh * scale;
+    
+    // Tọa độ để căn giữa (sẽ là số âm nếu bị crop)
+    final double x = (w - drawnW) / 2;
+    final double y = (h - drawnH) / 2;
+
+    // 3. Vẽ video vào canvas với kích thước chuẩn
+    ctx.drawImageScaled(_videoElement, x, y, drawnW, drawnH);
+
     final imgData = canvas.toDataUrl('image/jpeg', 0.9);
     setState(() {
       _capturedBase64 = imgData;
