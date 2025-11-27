@@ -8,7 +8,7 @@ import 'package:js/js.dart';
 import 'package:js/js_util.dart' as jsutil;
 import 'models.dart';
 import 'api_service.dart';
-import 'version_info.dart'; // <--- IMPORT FILE VERSION MỚI
+import 'version_info.dart';
 
 @JS()
 external Future<bool> loadModels();
@@ -21,6 +21,7 @@ external void getFaceDescriptor(String imageBase64, Object callback);
 @JS()
 external void stopRealtimeDetection();
 
+// KHÔI PHỤC LẠI HÀM NÀY
 @JS() 
 external void closeWindow(); 
 
@@ -51,9 +52,7 @@ class VerificationPage extends StatefulWidget {
 }
 
 class _VerificationPageState extends State<VerificationPage> {
-  // *** CẤU HÌNH PHIÊN BẢN TẠI ĐÂY ***
-  final String _appVersion = "Ver: 1.1.0 (Build 2711)"; 
-  
+  final String _displayVersion = appVersion;
   String _status = 'Đang bắt đầu quá trình chấm công...';
   late html.VideoElement _videoElement;
   bool _isProcessing = false;
@@ -254,6 +253,9 @@ class _VerificationPageState extends State<VerificationPage> {
         });
       }
 
+      // TỰ ĐỘNG ĐÓNG SAU 2 GIÂY
+      // Nếu mở bằng link/script -> Sẽ đóng thành công
+      // Nếu mở bằng tay -> Sẽ không đóng (nhưng không lỗi)
       await Future.delayed(const Duration(seconds: 2));
       if (mounted) closeWindow(); 
   }
@@ -400,14 +402,14 @@ class _VerificationPageState extends State<VerificationPage> {
             
             const SizedBox(height: 10),
             
-            // --- NÚT ĐÓNG TAB ---
+            // --- NÚT ĐÓNG TAB (DÙNG LỆNH CHUẨN) ---
             if (_isSuccess)
                Padding(
                 padding: const EdgeInsets.only(top: 10),
                 child: ElevatedButton.icon(
                   icon: const Icon(Icons.exit_to_app),
                   label: const Text('Đóng Tab Ngay'),
-                  onPressed: () => closeWindow(), 
+                  onPressed: () => closeWindow(), // Gọi lệnh chuẩn
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.grey[700],
                     foregroundColor: Colors.white,
@@ -427,11 +429,10 @@ class _VerificationPageState extends State<VerificationPage> {
                   textStyle: const TextStyle(fontSize: 18),
                 ),
               ),
-
-            // --- HIỂN THỊ VERSION (Ở DƯỚI CÙNG) ---
+// --- HIỂN THỊ VERSION (Ở DƯỚI CÙNG) ---
             const SizedBox(height: 30),
             Text(
-              _appVersion,
+              _displayVersion,
               style: const TextStyle(fontSize: 11, color: Colors.grey, fontStyle: FontStyle.italic),
             ),
             const SizedBox(height: 10),

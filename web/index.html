@@ -43,35 +43,56 @@
         return null;
     }
 
-    async function loadModels() {
-  // 1. Lấy đường dẫn hiện tại trên thanh địa chỉ
-  // Ví dụ: "/chamcong/index.html" hoặc "/chamcong/" hoặc "/"
-  let path = window.location.pathname;
+async function loadModels() {
+        if (areModelsLoaded) {
+            console.log("JS: Models da tai tu truoc, bo qua.");
+            return true;
+        }
 
-  // 2. Cắt bỏ tên file (nếu có) để chỉ lấy thư mục
-  // Ví dụ: "/chamcong/index.html" -> "/chamcong/"
-  let folderPath = path.substring(0, path.lastIndexOf('/') + 1);
+        // A. Tính toán đường dẫn tuyệt đối (Để chạy được trên IIS/Folder con)
+        let path = window.location.pathname;
+        let folderPath = path.substring(0, path.lastIndexOf('/') + 1);
+        
+        // Loại bỏ dấu / thừa nếu có để tránh lỗi double slash
+        let origin = window.location.origin;
+        if (origin.endsWith('/')) origin = origin.slice(0, -1);
+        
+        // Kết quả: http://domain.com/chamcong/weights
+        const MODEL_URL = origin + folderPath + 'weights';
 
-  // 3. Ghép với tên miền để ra đường dẫn tuyệt đối
-  // Ví dụ: "http://192.168.1.249" + "/chamcong/" + "weights"
-  // Kết quả: "http://192.168.1.249/chamcong/weights"
-  const MODEL_URL = window.location.origin + folderPath + 'weights';
+        console.log("JS: Bat dau tai model tu: " + MODEL_URL);
 
-  console.log("--> DANG TAI MODEL TU: " + MODEL_URL); // Xem dòng này trong F12 để kiểm tra
-
-  try {
-    // Tải các model từ đường dẫn tuyệt đối vừa tính được
-    await faceapi.loadTinyFaceDetectorModel(MODEL_URL);
-    await faceapi.loadFaceLandmarkModel(MODEL_URL);
-    await faceapi.loadFaceRecognitionModel(MODEL_URL);
-    
-    console.log("--> TAI MODEL THANH CONG!");
-    return true;
-  } catch (e) {
-    console.error("--> LOI TAI MODEL:", e);
-    return false;
-  }
-}
+        try {
+            // B. Dùng Promise.all để tải song song (Nhanh và ổn định như hàm chạy được của bạn)
+            await Promise.all([
+                faceapi.loadTinyFaceDetectorModel(MODEL_URL),
+                faceapi.loadFaceLandmarkModel(MODEL_URL),
+                faceapi.loadFaceRecognitionModel(MODEL_URL)
+            ]);
+            
+            areModelsLoaded = true; // Đánh dấu đã tải xong
+            console.log("JS: Tai Model THANH CONG (Parallel Mode)!");
+            return true;
+        } catch (e) {
+            console.error("JS: LOI TAI MODEL (Dynamic Path):", e);
+            
+            // C. Fallback: Nếu đường dẫn động thất bại, thử dùng đường dẫn tương đối cổ điển
+            try {
+                console.log("JS: Thu fallback ve duong dan '/weights'...");
+                await Promise.all([
+                    faceapi.loadTinyFaceDetectorModel('weights'),
+                    faceapi.loadFaceLandmarkModel('weights'),
+                    faceapi.loadFaceRecognitionModel('weights')
+                ]);
+                areModelsLoaded = true;
+                console.log("JS: Tai Model Fallback THANH CONG!");
+                return true;
+            } catch (ex) {
+                console.error("JS: CHET HAN. Khong tai duoc model:", ex);
+                return false;
+            }
+        }
+    }
 
     async function startCamera(unusedId, onFaceDetected, onBlinkDetected) {
         console.log("JS: Đang quét sâu vào DOM để tìm video...");
