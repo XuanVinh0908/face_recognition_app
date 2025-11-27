@@ -359,8 +359,8 @@ class _VerificationPageState extends State<VerificationPage> {
       if (distance == double.maxFinite) return false;
       
       // *** NỚI LỎNG NGƯỠNG SO SÁNH ***
-      // Tăng từ 0.4 -> 0.55 để dễ chấm công hơn
-      if (distance < 0.55) { 
+      // Tăng từ 0.4 -> 0.7 để dễ chấm công hơn
+      if (distance < 0.7) { 
         setState(() => _status = "Khuôn mặt khớp! Đang gửi...");
         final success = await ApiService().saveCheckIn(widget.currentUser.userId, result.imageBase64!);
         if (!mounted) return false;
@@ -440,20 +440,25 @@ class _VerificationPageState extends State<VerificationPage> {
                         ),
                       ),
                     
-                    if ((showCameraView || _capturedImage != null) && !_isSuccess)
-                      Center(
-                        child: Container(
-                          width: _processingWidth * 0.6,
-                          height: _processingHeight * 0.8,
-                          decoration: BoxDecoration(
-                            border: Border.all(
-                                color: _capturedImage != null ? Colors.green : Colors.yellow, 
-                                width: 4
-                            ),
-                            borderRadius: BorderRadius.circular(150),
+                    // LỚP 2: KHUNG HÌNH TRÒN (OVAL)
+                  if (showCameraView)
+                    Center(
+                      child: Container(
+                        // Kích thước khung: 60% chiều rộng, 80% chiều cao của video
+                        width: _processingWidth * 0.6,
+                        height: _processingHeight * 0.8,
+                        decoration: BoxDecoration(
+                          // QUAN TRỌNG: Dùng BoxShape.oval để tạo hình bầu dục mềm mại tuyệt đối
+                          // Thay vì dùng borderRadius (có thể bị vuông ở cạnh)
+                          shape: BoxShape.circle, 
+                          border: Border.all(
+                              // Logic màu: Xanh khi đang xử lý (Pause), Vàng khi đang quét
+                              color: _videoElement.paused ? Colors.green : Colors.yellow, 
+                              width: 4
                           ),
                         ),
                       ),
+                    ),
                       
                     if (_isSuccess)
                       Container(
