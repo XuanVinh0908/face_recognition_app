@@ -44,23 +44,34 @@
     }
 
     async function loadModels() {
-        if (areModelsLoaded) return true;
-        const modelPath = '/weights';
-        console.log("JS: Bắt đầu tải model...");
-        try {
-            await Promise.all([
-                faceapi.loadTinyFaceDetectorModel(modelPath),
-                faceapi.loadFaceLandmarkModel(modelPath),
-                faceapi.loadFaceRecognitionModel(modelPath)
-            ]);
-            areModelsLoaded = true;
-            console.log("JS: Model đã tải xong.");
-            return true;
-        } catch (error) {
-            console.error("JS: Lỗi tải model:", error);
-            return false;
-        }
-    }
+  // 1. Lấy đường dẫn hiện tại trên thanh địa chỉ
+  // Ví dụ: "/chamcong/index.html" hoặc "/chamcong/" hoặc "/"
+  let path = window.location.pathname;
+
+  // 2. Cắt bỏ tên file (nếu có) để chỉ lấy thư mục
+  // Ví dụ: "/chamcong/index.html" -> "/chamcong/"
+  let folderPath = path.substring(0, path.lastIndexOf('/') + 1);
+
+  // 3. Ghép với tên miền để ra đường dẫn tuyệt đối
+  // Ví dụ: "http://192.168.1.249" + "/chamcong/" + "weights"
+  // Kết quả: "http://192.168.1.249/chamcong/weights"
+  const MODEL_URL = window.location.origin + folderPath + 'weights';
+
+  console.log("--> DANG TAI MODEL TU: " + MODEL_URL); // Xem dòng này trong F12 để kiểm tra
+
+  try {
+    // Tải các model từ đường dẫn tuyệt đối vừa tính được
+    await faceapi.loadTinyFaceDetectorModel(MODEL_URL);
+    await faceapi.loadFaceLandmarkModel(MODEL_URL);
+    await faceapi.loadFaceRecognitionModel(MODEL_URL);
+    
+    console.log("--> TAI MODEL THANH CONG!");
+    return true;
+  } catch (e) {
+    console.error("--> LOI TAI MODEL:", e);
+    return false;
+  }
+}
 
     async function startCamera(unusedId, onFaceDetected, onBlinkDetected) {
         console.log("JS: Đang quét sâu vào DOM để tìm video...");
