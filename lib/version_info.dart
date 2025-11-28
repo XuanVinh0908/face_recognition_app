@@ -1,2 +1,1 @@
-// lib/version_info.dart
-const String appVersion = "Dev Version";
+const String appVersion = "Ver: 1.0.20251127.1653";
