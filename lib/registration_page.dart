@@ -1,28 +1,52 @@
 import 'dart:async';
 import 'dart:html' as html;
-import 'dart:math'; // Để dùng pi
-import 'package:flutter/material.dart';
+import 'dart:math';
+import 'dart:ui' as ui;
+import 'package:flutter/material.dart'; 
 import 'dart:ui_web' as ui_web;
 import 'package:js/js.dart';
 import 'package:js/js_util.dart' as jsutil;
 import 'models.dart';
 import 'api_service.dart';
+import 'version_info.dart'; // Import file version
 
+// --- KHAI BÁO JS INTEROP (CHỈ GIỮ LẠI CÁI CẦN THIẾT) ---
 @JS()
-external Future<bool> loadModels();
-@JS()
-external Future<bool> startCamera(String videoElementId, Function onFaceDetected, Function onBlinkDetected);
-
-// Hàm này nhận vào CanvasElement hoặc String Base64
-@JS()
-external void getFaceDescriptor(Object canvasOrBase64, Object callback);
+external void getFaceDescriptor(String imageBase64, Object callback);
 
 @JS()
 external void stopRealtimeDetection();
-@JS()
-external void closeWindow();
 
-// --- CLASS CALLBACK ĐỂ SỬA LỖI JS INTEROP ---
+@JS() 
+external void closeWindow(); 
+
+// --- CÁC HÀM WRAPPER GỌI JS AN TOÀN (GIỐNG TRANG CHẤM CÔNG) ---
+Future<bool> loadModels() async {
+  try {
+    final promise = jsutil.callMethod(html.window, 'loadModels', []);
+    await jsutil.promiseToFuture(promise); 
+    return true;
+  } catch (e) {
+    print("Dart Error loading models: $e");
+    return false;
+  }
+}
+
+Future<bool> startCamera(String videoElementId, Function onFaceDetected, Function onBlinkDetected) async {
+  try {
+    final promise = jsutil.callMethod(html.window, 'startCamera', [
+      videoElementId, 
+      onFaceDetected, 
+      onBlinkDetected
+    ]);
+    await jsutil.promiseToFuture(promise);
+    return true;
+  } catch (e) {
+    print("Dart Error starting camera: $e");
+    return false;
+  }
+}
+
 @JSExport()
 class FaceApiCallback {
   final Function(List<double>?) _onResult;
@@ -40,7 +64,6 @@ class FaceApiCallback {
     }
   }
 }
-// ---------------------------------------------
 
 class RegistrationPage extends StatefulWidget {
   final Employee currentUser;
@@ -51,28 +74,28 @@ class RegistrationPage extends StatefulWidget {
 }
 
 class _RegistrationPageState extends State<RegistrationPage> {
-  String _status = 'Vui lòng chọn một phương thức đăng ký...';
+  final String _displayVersion = appVersion;
+  String _status = 'Vui lòng chọn phương thức đăng ký...';
   late html.VideoElement _videoElement;
   bool _isProcessing = false;
-  final double _processingWidth = 480;
-  final double _processingHeight = 360;
   late final String _viewId;
 
+  // --- LOGIC MOBILE & KÍCH THƯỚC ĐỘNG ---
+  bool get _isMobile => html.window.innerWidth! < html.window.innerHeight!;
+  double get _processingWidth => _isMobile ? 360 : 480;
+  double get _processingHeight => _isMobile ? 480 : 360;
+
+  // Biến trạng thái
   bool _showCamera = false;
   String? _uploadedImageBase64;
-  html.ImageElement? _uploadedImage;
-  bool _isCameraInitialized = false;
-  bool _areModelsLoaded = false;
+  String? _capturedCameraBase64; // Chỉ lưu base64, không cần Image widget
   
-  // Biến lưu ảnh chụp từ camera và khung mặt
-  Image? _capturedCameraImage;
-  String? _capturedCameraBase64;
-  Rect? _faceRect;
+  bool _areModelsLoaded = false;
+  bool _cameraStarted = false;
 
   @override
   void initState() {
     super.initState();
-    // ID phải chứa chuỗi "video-view" để khớp với JS
     _viewId = 'video-view-reg-${DateTime.now().millisecondsSinceEpoch}';
     _videoElement = html.VideoElement()
       ..id = _viewId
@@ -80,34 +103,43 @@ class _RegistrationPageState extends State<RegistrationPage> {
       ..muted = true
       ..setAttribute('playsinline', 'true')
       ..setAttribute('webkit-playsinline', 'true')
-      // Lật ngược và set kích thước
-      ..style.transform = 'scaleX(-1)'
-      ..style.width = '100%'
-      ..style.height = '100%'
-      ..style.objectFit = 'cover';
+      ..style.transform = 'scaleX(-1)'; 
+      
+      // CSS Cover chuẩn
+      _videoElement.style.objectFit = 'cover'; 
+      _videoElement.style.width = '100%';
+      _videoElement.style.height = '100%';
 
-    // ignore: undefined_prefixed_name
     ui_web.platformViewRegistry.registerViewFactory(_viewId, (int viewId) => _videoElement);
   }
 
   @override
   void dispose() {
     stopRealtimeDetection();
-    _videoElement.srcObject?.getTracks().forEach((track) => track.stop());
+    _stopCameraStream();
     super.dispose();
+  }
+
+  void _stopCameraStream() {
+    try {
+      if (_videoElement.srcObject != null) {
+        _videoElement.srcObject?.getTracks().forEach((track) => track.stop());
+        _videoElement.srcObject = null;
+      }
+    } catch (e) {
+      print("Lỗi tắt camera: $e");
+    }
   }
 
   Future<bool> _ensureModelsLoaded() async {
     if (_areModelsLoaded) return true;
-    
     setState(() {
       _isProcessing = true;
       _status = 'Đang tải model nhận dạng...';
     });
-    // Chờ một chút cho UI cập nhật
-    await Future.delayed(const Duration(milliseconds: 100));
-
+    
     _areModelsLoaded = await loadModels();
+    
     if (!mounted) return false;
 
     if (!_areModelsLoaded) {
@@ -120,6 +152,7 @@ class _RegistrationPageState extends State<RegistrationPage> {
     return true;
   }
 
+  // --- CHUYỂN ĐỔI CHẾ ĐỘ ---
   Future<void> _setMode(bool useCamera) async {
     if (_isProcessing) return;
 
@@ -129,10 +162,7 @@ class _RegistrationPageState extends State<RegistrationPage> {
     setState(() {
       _showCamera = useCamera;
       _uploadedImageBase64 = null;
-      _uploadedImage = null;
-      _capturedCameraImage = null; // Reset ảnh chụp
       _capturedCameraBase64 = null;
-      _faceRect = null;
       _status = useCamera ? 'Đang khởi tạo camera...' : 'Vui lòng chọn ảnh từ thư viện...';
       _isProcessing = false; 
     });
@@ -141,70 +171,89 @@ class _RegistrationPageState extends State<RegistrationPage> {
       await _initializeCamera();
     } else {
       stopRealtimeDetection();
-      _videoElement.srcObject?.getTracks().forEach((track) => track.stop());
-      _isCameraInitialized = false;
+      _stopCameraStream();
+      _cameraStarted = false;
     }
   }
 
+  // --- LOGIC CAMERA (ĐÃ CẬP NHẬT THEO VERIFICATION PAGE) ---
   Future<void> _initializeCamera() async {
-    if (_isCameraInitialized) {
-       setState(() => _status = 'Vui lòng giữ nguyên khuôn mặt trong khung hình...');
+    if (_cameraStarted) {
+       // Nếu đang pause thì play lại
+       if (_videoElement.paused) _videoElement.play();
+       setState(() => _status = 'Vui lòng đưa khuôn mặt vào khung hình bầu dục...');
        return;
     }
-    
-    // Chờ 1s để đảm bảo DOM render thẻ video
-    await Future.delayed(const Duration(seconds: 1));
 
     final onFaceDetected = jsutil.allowInterop((dynamic result) {
       if (!mounted || _isProcessing || !_showCamera) return;
       if (result != null) {
-        // Dừng camera
+        // 1. Dừng hình video (Tạo cảm giác chụp mượt)
+        _videoElement.pause();
+        
+        // 2. Cắt ảnh ngầm (Crop chính xác)
+        _captureCameraFrame();
+        
         stopRealtimeDetection();
         
-        // Chụp ảnh
-        _captureCameraFrame();
-
-        // Lấy tọa độ để vẽ khung
-        try {
-          final x = (jsutil.getProperty(result, 'x') as num).toDouble();
-          final y = (jsutil.getProperty(result, 'y') as num).toDouble();
-          final width = (jsutil.getProperty(result, 'width') as num).toDouble();
-          final height = (jsutil.getProperty(result, 'height') as num).toDouble();
-          setState(() => _faceRect = Rect.fromLTWH(x, y, width, height));
-        } catch(e) {
-           print("Lỗi đọc tọa độ JS: $e");
-        }
-
-        // Tiến hành đăng ký với ảnh đã chụp
+        setState(() => _status = "Đã chụp ảnh. Đang xử lý...");
+        
+        // 3. Tiến hành đăng ký
         _registerFaceFromCamera();
       }
     });
+
     final onBlinkDetected = jsutil.allowInterop((){});
 
-    final cameraStarted = await startCamera(_viewId, onFaceDetected, onBlinkDetected);
+    final success = await startCamera(_viewId, onFaceDetected, onBlinkDetected);
     
     if (!mounted) return;
-    if (cameraStarted) {
-      _isCameraInitialized = true;
-      setState(() => _status = 'Vui lòng giữ nguyên khuôn mặt trong khung hình...');
+    if (success) {
+      _cameraStarted = true;
+      setState(() => _status = 'Vui lòng đưa khuôn mặt vào khung hình bầu dục...');
     } else {
-      setState(() => _status = 'Lỗi không thể truy cập camera: Vui lòng kiểm tra quyền truy cập.');
+      setState(() => _status = 'Lỗi không thể truy cập camera.');
     }
   }
 
-  // Hàm chụp ảnh từ camera
+  // --- HÀM CẮT ẢNH CHUẨN (OBJECT-FIT: COVER) ---
   void _captureCameraFrame() {
-    final canvas = html.CanvasElement(width: _processingWidth.toInt(), height: _processingHeight.toInt());
-    final ctx = canvas.getContext('2d') as html.CanvasRenderingContext2D;
-    // Lật ngược canvas
-    ctx.translate(_processingWidth, 0);
-    ctx.scale(-1, 1);
-    ctx.drawImageScaled(_videoElement, 0, 0, _processingWidth, _processingHeight);
+    final int canvasW = _processingWidth.toInt();
+    final int canvasH = _processingHeight.toInt();
     
+    final canvas = html.CanvasElement(width: canvasW, height: canvasH);
+    final ctx = canvas.getContext('2d') as html.CanvasRenderingContext2D;
+
+    ctx.translate(canvasW, 0);
+    ctx.scale(-1, 1);
+
+    final videoW = _videoElement.videoWidth;
+    final videoH = _videoElement.videoHeight;
+    final double videoAspect = videoW / videoH;
+    final double canvasAspect = canvasW / canvasH;
+    
+    double renderW, renderH, offsetX, offsetY;
+
+    if (videoAspect > canvasAspect) {
+      renderH = videoH.toDouble();
+      renderW = videoH * canvasAspect;
+      offsetX = (videoW - renderW) / 2;
+      offsetY = 0;
+    } else {
+      renderW = videoW.toDouble();
+      renderH = videoW / canvasAspect;
+      offsetX = 0;
+      offsetY = (videoH - renderH) / 2;
+    }
+
+    ctx.drawImageScaledFromSource(
+      _videoElement, offsetX, offsetY, renderW, renderH, 0, 0, canvasW, canvasH
+    );
+
     _capturedCameraBase64 = canvas.toDataUrl('image/jpeg', 0.9);
-    _capturedCameraImage = Image.network(_capturedCameraBase64!);
   }
 
+  // --- LOGIC CHỌN ẢNH TỪ THƯ VIỆN (GIỮ NGUYÊN) ---
   Future<void> _pickImage() async {
     if (_isProcessing) return;
 
@@ -224,59 +273,38 @@ class _RegistrationPageState extends State<RegistrationPage> {
 
       reader.readAsDataUrl(file);
       reader.onLoadEnd.listen((e) {
-        final String base64Data = reader.result as String;
-        final html.ImageElement img = html.ImageElement();
-        img.src = base64Data;
-        img.onLoad.listen((_) {
-          setState(() {
-            _uploadedImageBase64 = base64Data;
-            _uploadedImage = img;
-            _status = 'Đã tải ảnh. Nhấn "Đăng ký" để xử lý.';
-          });
+        setState(() {
+          _uploadedImageBase64 = reader.result as String;
+          _status = 'Đã tải ảnh. Nhấn "Đăng ký" để xử lý.';
         });
       });
     });
   }
 
+  // --- CÁC HÀM XỬ LÝ ĐĂNG KÝ ---
+
   Future<void> _registerFaceFromCamera() async {
-    if (_isProcessing) return;
-    if (_capturedCameraBase64 == null) {
-        _initializeCamera(); // Nếu chưa có ảnh thì khởi tạo lại camera
-        return;
-    }
-    setState(() {
-      _isProcessing = true;
-      _status = "Đã chụp ảnh. Đang xử lý...";
-    });
-    
-    // Sử dụng chuỗi Base64 đã chụp
+    if (_capturedCameraBase64 == null) return;
     await _handleFaceProcessing(_capturedCameraBase64!, isCamera: true);
   }
 
   Future<void> _registerFaceFromUpload() async {
-    if (_uploadedImageBase64 == null || _isProcessing) {
-       setState(() => _status = 'Vui lòng chọn ảnh trước.');
-       return;
-    }
+    if (_uploadedImageBase64 == null) return;
     setState(() {
       _isProcessing = true;
       _status = "Đang xử lý ảnh tải lên...";
     });
-
-    // Sử dụng chuỗi Base64 đã upload
     await _handleFaceProcessing(_uploadedImageBase64!, isCamera: false);
   }
 
-  // Hàm xử lý chung, nhận vào chuỗi Base64
   Future<void> _handleFaceProcessing(String imageBase64, {required bool isCamera}) async {
     final completer = Completer<List<double>?>();
     
-    // SỬ DỤNG CLASS CALLBACK
     final callbackObject = FaceApiCallback((List<double>? descriptor) {
       completer.complete(descriptor);
     });
     
-    // Gọi hàm JS với chuỗi Base64
+    // Gọi hàm JS trích xuất vector
     getFaceDescriptor(imageBase64, jsutil.createDartExport(callbackObject));
     final descriptor = await completer.future;
 
@@ -284,32 +312,31 @@ class _RegistrationPageState extends State<RegistrationPage> {
 
     if (descriptor != null) {
       setState(() => _status = "Đã có dữ liệu, đang gửi về server...");
-      // Gọi API đăng ký
+      
       final success = await ApiService().registerFaceAndLocation(widget.currentUser.userId, descriptor, imageBase64);
 
       if (!mounted) return;
       if (success) {
         setState(() => _status = "Đăng ký thành công! Tab sẽ đóng sau 2 giây.");
         await Future.delayed(const Duration(seconds: 2));
-        if (mounted) {
-          closeWindow();
-        }
+        if (mounted) closeWindow();
       } else {
         setState(() {
-           _status = "Đăng ký thất bại: Lỗi khi gửi dữ liệu về server.";
+           _status = "Đăng ký thất bại: Lỗi Server.";
            _isProcessing = false;
+           // Nếu là camera, cho phép chụp lại nhưng không tự restart ngay để user đọc lỗi
+           if(isCamera) _videoElement.play(); 
         });
       }
     } else {
       setState(() {
-        _status = "Đăng ký thất bại: Không tìm thấy khuôn mặt hợp lệ. Vui lòng thử lại.";
+        _status = "Không tìm thấy khuôn mặt rõ ràng. Vui lòng thử lại.";
         _isProcessing = false;
-        // Nếu là camera thì tự động khởi động lại để chụp lại
         if(isCamera) {
-             _capturedCameraImage = null;
-             _capturedCameraBase64 = null;
-             _faceRect = null;
-            _initializeCamera();
+            // Restart lại quy trình sau 2s
+            Future.delayed(const Duration(seconds: 2), () {
+               if(mounted && _showCamera) _initializeCamera();
+            });
         }
       });
     }
@@ -318,13 +345,13 @@ class _RegistrationPageState extends State<RegistrationPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text('Đăng ký cho: ${widget.currentUser.userName}')),
+      appBar: AppBar(title: Text('Đăng ký: ${widget.currentUser.userName}')),
       body: Center(
         child: SingleChildScrollView(
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              // --- THANH CHỌN CHẾ ĐỘ ---
+              // THANH CHỌN CHẾ ĐỘ
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16.0),
                 child: Column(
@@ -355,44 +382,36 @@ class _RegistrationPageState extends State<RegistrationPage> {
               
               const SizedBox(height: 16),
 
-              // --- KHUNG HIỂN THỊ (CAMERA HOẶC ẢNH) ---
+              // --- KHUNG HIỂN THỊ ---
               if (_showCamera)
-                SizedBox(
-                  width: _processingWidth,
-                  height: _processingHeight,
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      // 1. Video gốc (ẩn khi có ảnh chụp)
-                      Offstage(
-                        offstage: _capturedCameraImage != null,
-                        child: HtmlElementView(viewType: _viewId)
-                      ),
+                ClipRect( // Cắt gọn phần thừa
+                  child: SizedBox(
+                    width: _processingWidth,
+                    height: _processingHeight,
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        // Video (Khi chụp xong sẽ Pause, tạo cảm giác ảnh tĩnh)
+                        HtmlElementView(viewType: _viewId),
 
-                      // 2. Ảnh chụp (hiện đè lên video)
-                      if (_capturedCameraImage != null)
-                        Positioned.fill(child: _capturedCameraImage!),
-
-                      // 3. Viền và khung mặt
-                      Center(
-                        child: Container(
-                          width: _processingWidth * 0.6,
-                          height: _processingHeight * 0.8,
-                          decoration: BoxDecoration(
-                            border: Border.all(color: _faceRect != null ? Colors.green : Colors.yellow, width: 4),
-                            borderRadius: BorderRadius.circular(150),
+                        // Khung Bầu Dục (OVAL)
+                        Center(
+                          child: Container(
+                            width: _processingWidth * 0.6,
+                            height: _processingHeight * 0.8,
+                            decoration: ShapeDecoration(
+                              shape: OvalBorder(
+                                side: BorderSide(
+                                  // Xanh khi pause (chụp xong), Vàng khi đang tìm
+                                  color: _videoElement.paused ? Colors.green : Colors.yellow,
+                                  width: 4,
+                                ),
+                              ),
+                            ),
                           ),
                         ),
-                      ),
-                      
-                      // 4. Vẽ khung mặt nếu có (không lật ngược nếu là ảnh chụp)
-                      if (_faceRect != null)
-                        Transform(
-                          alignment: Alignment.center,
-                          transform: _capturedCameraImage != null ? Matrix4.identity() : Matrix4.rotationY(pi),
-                          child: CustomPaint(painter: FaceBoxPainter(rect: _faceRect!)),
-                        ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
               
@@ -439,46 +458,38 @@ class _RegistrationPageState extends State<RegistrationPage> {
                   ),
                 ),
 
-              // --- TRẠNG THÁI VÀ NÚT ĐÓNG ---
+              // TRẠNG THÁI
               const SizedBox(height: 20),
               _isProcessing 
                 ? Column(children: [
-                    if(!_status.contains("THÀNH CÔNG")) const CircularProgressIndicator(),
+                    if(!_status.contains("thành công")) const CircularProgressIndicator(),
                     const SizedBox(height: 8), 
                     Text(_status, textAlign: TextAlign.center, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold))
                   ])
-                : Text(_status, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold), textAlign: TextAlign.center, maxLines: 2, overflow: TextOverflow.ellipsis,),
+                : Text(_status, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold), textAlign: TextAlign.center),
 
               const SizedBox(height: 30),
               ElevatedButton.icon(
                 icon: const Icon(Icons.close),
                 label: const Text('Đóng Tab'),
-                onPressed: _isProcessing ? null : () {
-                  closeWindow(); 
-                },
+                onPressed: _isProcessing ? null : () => closeWindow(),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.grey[600],
                   padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 15),
                 ),
               ),
+              
+              // HIỂN THỊ VERSION
               const SizedBox(height: 20),
+              Text(
+                _displayVersion,
+                style: const TextStyle(fontSize: 11, color: Colors.grey, fontStyle: FontStyle.italic),
+              ),
+              const SizedBox(height: 10),
             ],
           ),
         ),
       ),
     );
   }
-}
-
-// (Class FaceBoxPainter dùng chung, nếu đã có ở file khác thì không cần copy lại)
-class FaceBoxPainter extends CustomPainter {
-  final Rect rect;
-  FaceBoxPainter({required this.rect});
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()..color = Colors.lightGreenAccent..style = PaintingStyle.stroke..strokeWidth = 4.0;
-    canvas.drawRect(rect, paint);
-  }
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
 }
