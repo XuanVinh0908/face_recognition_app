@@ -67,7 +67,13 @@ class FaceApiCallback {
 
 class VerificationPage extends StatefulWidget {
   final Employee currentUser;
-  const VerificationPage({super.key, required this.currentUser});
+  final int attendanceMode; // 0: Vào, 1: Ra (MỚI)
+
+  const VerificationPage({
+    super.key, 
+    required this.currentUser,
+    required this.attendanceMode // MỚI
+  });
 
   @override
   State<VerificationPage> createState() => _VerificationPageState();
@@ -89,7 +95,7 @@ class _VerificationPageState extends State<VerificationPage> {
   
   // Biến lưu ảnh Widget để đè lên video
   Image? _capturedWidget; 
-  // Biến lưu base64 để gửi đi
+  // Biến lưu base64
   String? _capturedBase64; 
   
   bool _areModelsLoaded = false;
@@ -98,6 +104,11 @@ class _VerificationPageState extends State<VerificationPage> {
   @override
   void initState() {
     super.initState();
+    
+    // Cập nhật trạng thái ban đầu theo chế độ
+    String modeName = widget.attendanceMode == 0 ? "VÀO" : "RA";
+    _status = 'Đang chuẩn bị chấm công $modeName...';
+
     _viewId = 'video-view-ver-${DateTime.now().millisecondsSinceEpoch}';
     _videoElement = html.VideoElement()
       ..id = _viewId
@@ -163,7 +174,6 @@ class _VerificationPageState extends State<VerificationPage> {
   Future<void> _startVerificationProcess() async {
     if (_isProcessing) return;
     
-    // Nếu video đang dừng thì cho chạy lại
     if (_videoElement.srcObject != null) {
        try { _videoElement.play(); } catch(e) {}
     }
@@ -190,15 +200,9 @@ class _VerificationPageState extends State<VerificationPage> {
       if (_capturedBase64 != null) return;
 
       if (result != null) {
-        // --- BƯỚC FIX LỖI IPHONE (SEQUENCE LOCKING) ---
-        
-        // 1. Ngắt ngay vòng lặp JS
+        // --- LOGIC FIX IPHONE (SEQUENCE LOCKING) ---
         stopRealtimeDetection();
-
-        // 2. Chụp ảnh và hiển thị Widget đè lên Video
         _captureFrameAndShow();
-        
-        // 3. BẮT BUỘC CHỜ (Yêu cầu số 1 của bạn): Để Flutter kịp vẽ ảnh lên màn hình
         await Future.delayed(const Duration(milliseconds: 100));
         
         setState(() {
@@ -216,12 +220,10 @@ class _VerificationPageState extends State<VerificationPage> {
               await Future.delayed(const Duration(seconds: 2));
               
               if (mounted && !_isSuccess) {
-                  // Reset để chụp lại
                   setState(() {
                     _capturedWidget = null;
                     _capturedBase64 = null;
                   });
-                  // Gọi lại vòng lặp JS
                   _startFaceRecognition(); 
               }
             }
@@ -241,7 +243,8 @@ class _VerificationPageState extends State<VerificationPage> {
     if (_isSuccess) return; 
 
     if (cameraStarted) {
-      setState(() => _status = 'Vui lòng đưa khuôn mặt vào trong khung tròn...');
+      String modeName = widget.attendanceMode == 0 ? "VÀO" : "RA";
+      setState(() => _status = 'Đưa khuôn mặt vào khung tròn để CHẤM $modeName...');
     } else {
       setState(() {
         _status = 'Lỗi không thể truy cập camera.';
@@ -251,13 +254,11 @@ class _VerificationPageState extends State<VerificationPage> {
     }
   }
 
-  // --- HÀM CẮT & TẠO WIDGET ẢNH ---
   void _captureFrameAndShow() {
     if (_isSuccess) return;
     
     final int canvasW = _processingWidth.toInt();
     final int canvasH = _processingHeight.toInt();
-    
     final canvas = html.CanvasElement(width: canvasW, height: canvasH);
     final ctx = canvas.getContext('2d') as html.CanvasRenderingContext2D;
 
@@ -291,32 +292,30 @@ class _VerificationPageState extends State<VerificationPage> {
     
     setState(() {
       _capturedBase64 = imgData;
-      _capturedWidget = Image.network(
-        imgData, 
-        fit: BoxFit.fill,
-        gaplessPlayback: true,
-      );
+      _capturedWidget = Image.network(imgData, fit: BoxFit.fill, gaplessPlayback: true);
     });
   }
   
   Future<void> _markCheckInSuccessful() async {
     if (_isSuccess) return; 
 
+    // Vẫn chụp ảnh (để lấy base64 nếu cần debug hoặc gửi sau) 
+    // dù API mới không bắt buộc gửi ảnh, nhưng logic chụp ảnh giúp UI mượt
     String imageToSend = _capturedBase64 ?? "";
     if (imageToSend.isEmpty) {
-        // --- ĐÃ SỬA LỖI Ở ĐÂY: Ép kiểu as html.CanvasRenderingContext2D ---
         try {
            final canvas = html.CanvasElement(width: _processingWidth.toInt(), height: _processingHeight.toInt());
            final ctx = canvas.getContext('2d') as html.CanvasRenderingContext2D;
            ctx.drawImageScaled(_videoElement, 0, 0, _processingWidth, _processingHeight);
            imageToSend = canvas.toDataUrl('image/jpeg', 0.9);
-        } catch(e) {
-           print("Backup capture error: $e");
-        }
+        } catch(e) {}
     }
 
     setState(() => _status = "Đang gửi dữ liệu chấm công...");
-    final success = await ApiService().saveCheckIn(widget.currentUser.userId, imageToSend);
+    
+    // GỌI API MỚI VỚI STATUS
+    final success = await ApiService().saveCheckIn(widget.currentUser.userId, widget.attendanceMode);
+    
     if (!mounted) return;
 
     if (success) {
@@ -339,8 +338,9 @@ class _VerificationPageState extends State<VerificationPage> {
       _stopCameraStream();
 
       if (mounted) {
+        String modeName = widget.attendanceMode == 0 ? "VÀO" : "RA";
         setState(() {
-           _status = "CHẤM CÔNG THÀNH CÔNG!";
+           _status = "CHẤM CÔNG $modeName THÀNH CÔNG!";
            _isProcessing = false; 
         });
       }
@@ -366,10 +366,13 @@ class _VerificationPageState extends State<VerificationPage> {
       
       if (distance == double.maxFinite) return false;
       
-      // *** YÊU CẦU SỐ 3: ĐỘ KHÓ 0.5 ***
+      // Ngưỡng 0.5 (Độ khó bạn đã chọn)
       if (distance < 0.5) { 
         setState(() => _status = "Khuôn mặt khớp! Đang gửi...");
-        final success = await ApiService().saveCheckIn(widget.currentUser.userId, result.imageBase64!);
+        
+        // GỌI API MỚI
+        final success = await ApiService().saveCheckIn(widget.currentUser.userId, widget.attendanceMode);
+        
         if (!mounted) return false;
         
         if (success) {
@@ -414,7 +417,7 @@ class _VerificationPageState extends State<VerificationPage> {
     final bool showLoading = !_areModelsLoaded;
     
     return Scaffold(
-      appBar: AppBar(title: Text('Chấm công cho: ${widget.currentUser.userName}')),
+      appBar: AppBar(title: Text('Chấm công: ${widget.currentUser.userName}')),
       body: Center(
         child: Column( 
           mainAxisAlignment: MainAxisAlignment.center,
@@ -426,17 +429,14 @@ class _VerificationPageState extends State<VerificationPage> {
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    // LỚP 1: VIDEO
                     Offstage(
                       offstage: !showCameraView, 
                       child: HtmlElementView(viewType: _viewId),
                     ),
 
-                    // LỚP 2: ẢNH CHỤP TĨNH
                     if (_capturedWidget != null && !_isSuccess)
                       Positioned.fill(child: _capturedWidget!),
 
-                    // Màn hình chờ
                     if (!showCameraView && !_isSuccess && _capturedWidget == null)
                       Container(
                         decoration: BoxDecoration(color: Colors.grey[300]),
@@ -445,14 +445,13 @@ class _VerificationPageState extends State<VerificationPage> {
                         ),
                       ),
                     
-                    // LỚP 3: KHUNG HÌNH TRÒN (YÊU CẦU SỐ 2)
+                    // KHUNG TRÒN
                     if (showCameraView)
                       Center(
                         child: Container(
                           width: _processingWidth * 0.8,
                           height: _processingHeight * 0.8,
                           decoration: BoxDecoration(
-                            // Quay lại BoxShape.circle như bạn yêu cầu
                             shape: BoxShape.circle, 
                             border: Border.all(
                                 color: _capturedWidget != null ? Colors.green : Colors.yellow, 

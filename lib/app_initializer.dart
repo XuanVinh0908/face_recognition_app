@@ -9,7 +9,14 @@ import 'verification_page.dart';
 external Future<bool> loadModels();
 
 class AppInitializer extends StatefulWidget {
-  const AppInitializer({super.key});
+  final int attendanceMode; // Nhận từ Main
+  final String? userId; // Nhận từ Main (nếu có)
+
+  const AppInitializer({
+    super.key, 
+    required this.attendanceMode,
+    this.userId, // Có thể null nếu logic check ở Main
+  });
 
   @override
   State<AppInitializer> createState() => _AppInitializerState();
@@ -24,29 +31,27 @@ class _AppInitializerState extends State<AppInitializer> {
     _initializeApp();
   }
 
-  // --- HÀM KHỞI TẠO ĐÃ ĐƯỢC TÁI CẤU TRÚC ĐỂ CHẠY TUẦN TỰ ---
   Future<void> _initializeApp() async {
     final uri = Uri.base;
-    final path = uri.pathSegments.isNotEmpty ? uri.pathSegments.last : '';
-    final userId = uri.queryParameters['id'];
+    final pathString = uri.toString(); 
+    
+    // Ưu tiên lấy ID từ widget truyền vào, nếu không có thì lấy từ URL
+    final userId = widget.userId ?? uri.queryParameters['id'];
 
     if (userId == null) {
       setState(() => _status = "Lỗi: Thiếu ID nhân viên trên URL.");
       return;
     }
     
-    // Bước 1: Tải dữ liệu người dùng trước
     setState(() => _status = "Bước 1/2: Đang tải dữ liệu người dùng...");
     final employee = await ApiService().getUserData(userId);
     
     if (!mounted) return;
     if (employee == null) {
-      // Nếu không tải được user, dừng lại và báo lỗi
-      setState(() => _status = "Lỗi: Không thể tải dữ liệu người dùng từ server. Vui lòng kiểm tra lại API.");
+      setState(() => _status = "Lỗi: Không thể tải dữ liệu người dùng.");
       return;
     }
 
-    // Bước 2: Nếu tải user thành công, tiếp tục tải model AI
     setState(() => _status = "Bước 2/2: Đang tải model nhận dạng...");
     final modelsLoaded = await loadModels();
 
@@ -56,19 +61,22 @@ class _AppInitializerState extends State<AppInitializer> {
       return;
     }
     
-    // Nếu tất cả thành công, điều hướng đến trang phù hợp
-    if (path.toLowerCase() == 'register') {
+    // Điều hướng
+    if (pathString.contains('register')) {
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(builder: (context) => RegistrationPage(currentUser: employee)),
       );
-    } else if (path.toLowerCase() == 'verify') {
+    } else {
+      // --- SỬA LỖI TẠI ĐÂY ---
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(builder: (context) => VerificationPage(currentUser: employee)),
+        MaterialPageRoute(builder: (context) => VerificationPage(
+          currentUser: employee,
+          // Phải truyền tham số này vào:
+          attendanceMode: widget.attendanceMode, 
+        )),
       );
-    } else {
-      setState(() => _status = "Lỗi: Chức năng không hợp lệ. URL phải là /register hoặc /verify.");
     }
   }
 

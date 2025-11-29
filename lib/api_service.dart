@@ -15,16 +15,16 @@ class ApiService {
         final data = jsonDecode(response.body);
         return Employee.fromJson(data, defaultUserId: userId);
       } else {
-        print('Lỗi khi lấy dữ liệu người dùng: ${response.statusCode}');
+        print('Lỗi user: ${response.statusCode}');
         return null;
       }
     } catch (e) {
-      print('Exception khi gọi API getUserData: $e');
+      print('Exception user: $e');
       return null;
     }
   }
 
-  // THAY ĐỔI: Thêm tham số 'imageBase64'
+  // Hàm đăng ký (Vẫn nhận ảnh String)
   Future<bool> registerFaceAndLocation(String userId, List<double> descriptor, String imageBase64) async {
     try {
       final hexFaceId = _encodeFaceDescriptorToHex(descriptor);
@@ -33,43 +33,46 @@ class ApiService {
       final response = await http.post(
         uri,
         headers: {'Content-Type': 'application/json'},
-        // THAY ĐỔI: Thêm 'anhDangKyBase64' vào body
         body: jsonEncode({
           'nhanvien': int.tryParse(userId) ?? 0,
           'fileName': hexFaceId,
-          'anhDangKyBase64': imageBase64, // Gửi ảnh Base64
+          'anhDangKyBase64': imageBase64,
         }),
       );
-      
-      print("Phản hồi từ server đăng ký: ${response.statusCode}");
       return response.statusCode == 200;
     } catch (e) {
-      print('Exception khi gọi API registerFaceAndLocation: $e');
       return false;
     }
   }
 
-  // THAY ĐỔI: Thêm tham số 'imageBase64'
-  Future<bool> saveCheckIn(String userId, String imageBase64) async {
+  // --- QUAN TRỌNG: HÀM NÀY PHẢI NHẬN INT STATUS ---
+  Future<bool> saveCheckIn(String userId, int status) async {
     try {
       final uri = Uri.parse('$_baseUrl/PUT_CHAMCONG');
       
+      print("API: Chấm công NV $userId - Trạng thái: $status");
+
       final response = await http.post(
         uri,
         headers: {'Content-Type': 'application/json'},
-        // THAY ĐỔI: Thêm 'anhChamCongBase64' vào body
         body: jsonEncode({
           'nhanvien': int.tryParse(userId) ?? 0,
-          'anhChamCongBase64': imageBase64, // Gửi ảnh Base64
+          'trangthai': status, // Gửi 0 hoặc 1
         }),
       );
 
-      print("Phản hồi từ server chấm công: ${response.statusCode}");
+      print("Response: ${response.statusCode}");
       return response.statusCode == 200;
     } catch (e) {
-      print('Exception khi gọi API saveCheckIn: $e');
+      print('Exception checkin: $e');
       return false;
     }
+  }
+  // ------------------------------------------------
+
+  Future<bool> updateThreshold(String userId, double newThreshold) async {
+     // ... (Giữ nguyên logic cập nhật nếu có)
+     return true;
   }
 
   String _encodeFaceDescriptorToHex(List<double> descriptor) {
