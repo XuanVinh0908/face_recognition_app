@@ -20,7 +20,7 @@ external void stopRealtimeDetection();
 @JS() 
 external void closeWindow(); 
 
-// --- HÀM WRAPPER: GỌI TRỰC TIẾP WINDOW ---
+// --- HÀM WRAPPER ---
 Future<bool> loadModels() async {
   try {
     final promise = jsutil.callMethod(html.window, 'loadModels', []);
@@ -87,8 +87,10 @@ class _VerificationPageState extends State<VerificationPage> {
   bool _verificationFailed = false;
   late final String _viewId;
   
-  Image? _capturedImage;
-  String? _capturedBase64;
+  // Biến lưu ảnh Widget để đè lên video
+  Image? _capturedWidget; 
+  // Biến lưu base64 để gửi đi
+  String? _capturedBase64; 
   
   bool _areModelsLoaded = false;
   bool _isSuccess = false; 
@@ -105,7 +107,6 @@ class _VerificationPageState extends State<VerificationPage> {
       ..setAttribute('webkit-playsinline', 'true')
       ..style.transform = 'scaleX(-1)'; 
       
-      // CSS để video tự động crop cho vừa khung (Cover)
       _videoElement.style.objectFit = 'cover'; 
       _videoElement.style.width = '100%';
       _videoElement.style.height = '100%';
@@ -139,7 +140,7 @@ class _VerificationPageState extends State<VerificationPage> {
     if (_isProcessing) return;
     setState(() {
       _isProcessing = true;
-      _status = 'Đang tải model nhận dạng... (Vui lòng đợi)';
+      _status = 'Đang tải model nhận dạng...';
     });
     
     _areModelsLoaded = await loadModels();
@@ -161,11 +162,18 @@ class _VerificationPageState extends State<VerificationPage> {
   
   Future<void> _startVerificationProcess() async {
     if (_isProcessing) return;
+    
+    // Nếu video đang dừng thì cho chạy lại
+    if (_videoElement.srcObject != null) {
+       try { _videoElement.play(); } catch(e) {}
+    }
+
     setState(() {
       _isProcessing = true;
       _verificationFailed = false;
-      _capturedImage = null; 
       _isSuccess = false;
+      _capturedWidget = null;
+      _capturedBase64 = null;
     });
 
     if (!mounted) return;
@@ -178,10 +186,20 @@ class _VerificationPageState extends State<VerificationPage> {
     final onFaceDetected = jsutil.allowInterop((dynamic result) async {
       if (!mounted || !_isProcessing) return;
       if (_isSuccess) return; 
+      
+      if (_capturedBase64 != null) return;
 
       if (result != null) {
-        _captureFrame();
+        // --- BƯỚC FIX LỖI IPHONE (SEQUENCE LOCKING) ---
+        
+        // 1. Ngắt ngay vòng lặp JS
         stopRealtimeDetection();
+
+        // 2. Chụp ảnh và hiển thị Widget đè lên Video
+        _captureFrameAndShow();
+        
+        // 3. BẮT BUỘC CHỜ (Yêu cầu số 1 của bạn): Để Flutter kịp vẽ ảnh lên màn hình
+        await Future.delayed(const Duration(milliseconds: 100));
         
         setState(() {
           _status = 'Đang so sánh...';
@@ -198,7 +216,12 @@ class _VerificationPageState extends State<VerificationPage> {
               await Future.delayed(const Duration(seconds: 2));
               
               if (mounted && !_isSuccess) {
-                  setState(() => _capturedImage = null); 
+                  // Reset để chụp lại
+                  setState(() {
+                    _capturedWidget = null;
+                    _capturedBase64 = null;
+                  });
+                  // Gọi lại vòng lặp JS
                   _startFaceRecognition(); 
               }
             }
@@ -212,7 +235,6 @@ class _VerificationPageState extends State<VerificationPage> {
       }
     });
 
-    setState(() => _status = 'Đang khởi động Camera...');
     final cameraStarted = await startCamera(_viewId, onFaceDetected, jsutil.allowInterop(() {}));
     
     if (!mounted) return;
@@ -222,15 +244,15 @@ class _VerificationPageState extends State<VerificationPage> {
       setState(() => _status = 'Vui lòng đưa khuôn mặt vào trong khung tròn...');
     } else {
       setState(() {
-        _status = 'Lỗi không thể truy cập camera (Quyền bị từ chối?)';
+        _status = 'Lỗi không thể truy cập camera.';
         _verificationFailed = true;
         _isProcessing = false;
       });
     }
   }
 
-  // *** HÀM MỚI: CẮT ẢNH CHÍNH XÁC TỪNG PIXEL (CROP) ***
-  void _captureFrame() {
+  // --- HÀM CẮT & TẠO WIDGET ẢNH ---
+  void _captureFrameAndShow() {
     if (_isSuccess) return;
     
     final int canvasW = _processingWidth.toInt();
@@ -239,55 +261,41 @@ class _VerificationPageState extends State<VerificationPage> {
     final canvas = html.CanvasElement(width: canvasW, height: canvasH);
     final ctx = canvas.getContext('2d') as html.CanvasRenderingContext2D;
 
-    // 1. Lật gương canvas trước khi vẽ
     ctx.translate(canvasW, 0);
     ctx.scale(-1, 1);
 
-    // 2. Tính toán vùng Cắt (Source Crop) từ Video gốc
     final videoW = _videoElement.videoWidth;
     final videoH = _videoElement.videoHeight;
-    
-    // Tính tỷ lệ khung hình
     final double videoAspect = videoW / videoH;
     final double canvasAspect = canvasW / canvasH;
     
     double renderW, renderH, offsetX, offsetY;
 
     if (videoAspect > canvasAspect) {
-      // Video rộng hơn Canvas (Ví dụ: Video 640x480, Canvas 360x480)
-      // -> Cắt bớt 2 bên trái phải
       renderH = videoH.toDouble();
       renderW = videoH * canvasAspect;
       offsetX = (videoW - renderW) / 2;
       offsetY = 0;
     } else {
-      // Video cao hơn Canvas (Hiếm gặp trên mobile nếu dùng width ideal)
-      // -> Cắt bớt trên dưới
       renderW = videoW.toDouble();
       renderH = videoW / canvasAspect;
       offsetX = 0;
       offsetY = (videoH - renderH) / 2;
     }
 
-    // 3. Vẽ phần ĐÃ CẮT (Source) vào toàn bộ Canvas (Destination)
-    // drawImage(source, sx, sy, sw, sh, dx, dy, dw, dh)
     ctx.drawImageScaledFromSource(
-      _videoElement,
-      offsetX,      // sx (Bắt đầu cắt từ đâu)
-      offsetY,      // sy
-      renderW,      // sw (Độ rộng vùng cắt)
-      renderH,      // sh
-      0,            // dx (Vẽ vào đâu trên canvas)
-      0,            // dy
-      canvasW,      // dw
-      canvasH       // dh
+      _videoElement, offsetX, offsetY, renderW, renderH, 0, 0, canvasW, canvasH
     );
 
     final imgData = canvas.toDataUrl('image/jpeg', 0.9);
+    
     setState(() {
       _capturedBase64 = imgData;
-      // BoxFit.cover để đảm bảo hiển thị khớp 100% với video
-      _capturedImage = Image.network(imgData, fit: BoxFit.cover); 
+      _capturedWidget = Image.network(
+        imgData, 
+        fit: BoxFit.fill,
+        gaplessPlayback: true,
+      );
     });
   }
   
@@ -296,14 +304,14 @@ class _VerificationPageState extends State<VerificationPage> {
 
     String imageToSend = _capturedBase64 ?? "";
     if (imageToSend.isEmpty) {
-        // Fallback: Nếu chưa chụp được thì chụp tạm (có thể bị méo nhưng có còn hơn không)
+        // --- ĐÃ SỬA LỖI Ở ĐÂY: Ép kiểu as html.CanvasRenderingContext2D ---
         try {
-          final canvas = html.CanvasElement(width: _processingWidth.toInt(), height: _processingHeight.toInt());
-          final ctx = canvas.getContext('2d') as html.CanvasRenderingContext2D;
-          ctx.drawImageScaled(_videoElement, 0, 0, _processingWidth, _processingHeight);
-          imageToSend = canvas.toDataUrl('image/jpeg', 0.9);
-        } catch (e) {
-          print("Backup capture error: $e");
+           final canvas = html.CanvasElement(width: _processingWidth.toInt(), height: _processingHeight.toInt());
+           final ctx = canvas.getContext('2d') as html.CanvasRenderingContext2D;
+           ctx.drawImageScaled(_videoElement, 0, 0, _processingWidth, _processingHeight);
+           imageToSend = canvas.toDataUrl('image/jpeg', 0.9);
+        } catch(e) {
+           print("Backup capture error: $e");
         }
     }
 
@@ -358,9 +366,8 @@ class _VerificationPageState extends State<VerificationPage> {
       
       if (distance == double.maxFinite) return false;
       
-      // *** NỚI LỎNG NGƯỠNG SO SÁNH ***
-      // Tăng từ 0.4 -> 0.7 để dễ chấm công hơn
-      if (distance < 0.7) { 
+      // *** YÊU CẦU SỐ 3: ĐỘ KHÓ 0.5 ***
+      if (distance < 0.5) { 
         setState(() => _status = "Khuôn mặt khớp! Đang gửi...");
         final success = await ApiService().saveCheckIn(widget.currentUser.userId, result.imageBase64!);
         if (!mounted) return false;
@@ -377,8 +384,6 @@ class _VerificationPageState extends State<VerificationPage> {
            return false;
         }
       } else {
-        // Vẫn in ra khoảng cách để debug nếu cần
-        print("Khoảng cách: $distance (Ngưỡng 0.55)"); 
         return false;
       }
     } else {
@@ -405,8 +410,8 @@ class _VerificationPageState extends State<VerificationPage> {
 
   @override
   Widget build(BuildContext context) {
-    final bool showCameraView = _areModelsLoaded && _isProcessing && !_verificationFailed && !_isSuccess;
-    final bool showLoading = !_areModelsLoaded && _isProcessing;
+    final bool showCameraView = _areModelsLoaded && !_isSuccess;
+    final bool showLoading = !_areModelsLoaded;
     
     return Scaffold(
       appBar: AppBar(title: Text('Chấm công cho: ${widget.currentUser.userName}')),
@@ -414,7 +419,6 @@ class _VerificationPageState extends State<VerificationPage> {
         child: Column( 
           mainAxisAlignment: MainAxisAlignment.center,
           children: [ 
-            // Dùng ClipRect để cắt bỏ mọi phần thừa nếu có, đảm bảo khung hình gọn gàng
             ClipRect(
               child: SizedBox(
                 width: _processingWidth,
@@ -422,43 +426,41 @@ class _VerificationPageState extends State<VerificationPage> {
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
+                    // LỚP 1: VIDEO
                     Offstage(
-                      offstage: !showCameraView || _capturedImage != null, 
+                      offstage: !showCameraView, 
                       child: HtmlElementView(viewType: _viewId),
                     ),
 
-                    if (_capturedImage != null && !_isSuccess)
-                      Positioned.fill(child: _capturedImage!),
+                    // LỚP 2: ẢNH CHỤP TĨNH
+                    if (_capturedWidget != null && !_isSuccess)
+                      Positioned.fill(child: _capturedWidget!),
 
-                    if (!showCameraView && _capturedImage == null && !_isSuccess)
+                    // Màn hình chờ
+                    if (!showCameraView && !_isSuccess && _capturedWidget == null)
                       Container(
                         decoration: BoxDecoration(color: Colors.grey[300]),
                         child: Center(
-                          child: showLoading
-                              ? const CircularProgressIndicator()
-                              : const Icon(Icons.videocam_off, size: 80, color: Colors.grey),
+                          child: const CircularProgressIndicator(),
                         ),
                       ),
                     
-                    // LỚP 2: KHUNG HÌNH TRÒN (OVAL)
-                  if (showCameraView)
-                    Center(
-                      child: Container(
-                        // Kích thước khung: 60% chiều rộng, 80% chiều cao của video
-                        width: _processingWidth * 0.6,
-                        height: _processingHeight * 0.8,
-                        decoration: BoxDecoration(
-                          // QUAN TRỌNG: Dùng BoxShape.oval để tạo hình bầu dục mềm mại tuyệt đối
-                          // Thay vì dùng borderRadius (có thể bị vuông ở cạnh)
-                          shape: BoxShape.circle, 
-                          border: Border.all(
-                              // Logic màu: Xanh khi đang xử lý (Pause), Vàng khi đang quét
-                              color: _videoElement.paused ? Colors.green : Colors.yellow, 
-                              width: 4
+                    // LỚP 3: KHUNG HÌNH TRÒN (YÊU CẦU SỐ 2)
+                    if (showCameraView)
+                      Center(
+                        child: Container(
+                          width: _processingWidth * 0.6,
+                          height: _processingHeight * 0.8,
+                          decoration: BoxDecoration(
+                            // Quay lại BoxShape.circle như bạn yêu cầu
+                            shape: BoxShape.circle, 
+                            border: Border.all(
+                                color: _capturedWidget != null ? Colors.green : Colors.yellow, 
+                                width: 8
+                            ),
                           ),
                         ),
                       ),
-                    ),
                       
                     if (_isSuccess)
                       Container(
