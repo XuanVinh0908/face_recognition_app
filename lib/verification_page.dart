@@ -449,14 +449,14 @@ class _VerificationPageState extends State<VerificationPage> {
                     if (showCameraView)
                       Center(
                         child: Container(
-                          width: _processingWidth * 0.6,
+                          width: _processingWidth * 0.8,
                           height: _processingHeight * 0.8,
                           decoration: BoxDecoration(
                             // Quay lại BoxShape.circle như bạn yêu cầu
                             shape: BoxShape.circle, 
                             border: Border.all(
                                 color: _capturedWidget != null ? Colors.green : Colors.yellow, 
-                                width: 8
+                                width: 4
                             ),
                           ),
                         ),
