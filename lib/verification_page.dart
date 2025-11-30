@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:html' as html;
-import 'dart:math';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart'; 
 import 'dart:ui_web' as ui_web;
@@ -10,7 +10,6 @@ import 'models.dart';
 import 'api_service.dart';
 import 'version_info.dart';
 
-// --- KHAI BÁO JS ---
 @JS()
 external void getFaceDescriptor(String imageBase64, Object callback);
 
@@ -20,16 +19,13 @@ external void stopRealtimeDetection();
 @JS() 
 external void closeWindow(); 
 
-// --- HÀM WRAPPER ---
+// --- WRAPPERS ---
 Future<bool> loadModels() async {
   try {
     final promise = jsutil.callMethod(html.window, 'loadModels', []);
     await jsutil.promiseToFuture(promise); 
     return true;
-  } catch (e) {
-    print("Dart Error loading models: $e");
-    return false;
-  }
+  } catch (e) { return false; }
 }
 
 Future<bool> startCamera(String videoElementId, Function onFaceDetected, Function onBlinkDetected) async {
@@ -41,39 +37,14 @@ Future<bool> startCamera(String videoElementId, Function onFaceDetected, Functio
     ]);
     await jsutil.promiseToFuture(promise);
     return true;
-  } catch (e) {
-    print("Dart Error starting camera: $e");
-    return false;
-  }
-}
-
-@JSExport()
-class FaceApiCallback {
-  final Function(List<double>?) _onResult;
-  FaceApiCallback(this._onResult);
-
-  @JSExport('onDescriptorResult')
-  void onDescriptorResult(dynamic descriptorJS) {
-    if (descriptorJS != null) {
-      final descriptor = (jsutil.dartify(descriptorJS) as List)
-          .map((e) => (e as num).toDouble())
-          .toList();
-      _onResult(descriptor);
-    } else {
-      _onResult(null);
-    }
-  }
+  } catch (e) { return false; }
 }
 
 class VerificationPage extends StatefulWidget {
   final Employee currentUser;
-  final int attendanceMode; // 0: Vào, 1: Ra (MỚI)
+  final int attendanceMode; 
 
-  const VerificationPage({
-    super.key, 
-    required this.currentUser,
-    required this.attendanceMode // MỚI
-  });
+  const VerificationPage({super.key, required this.currentUser, required this.attendanceMode});
 
   @override
   State<VerificationPage> createState() => _VerificationPageState();
@@ -81,33 +52,39 @@ class VerificationPage extends StatefulWidget {
 
 class _VerificationPageState extends State<VerificationPage> {
   final String _displayVersion = appVersion;
-  String _status = 'Đang bắt đầu quá trình chấm công...';
+  String _status = 'Khởi tạo...';
+  Color _statusColor = Colors.black;
+
+  // LOG DEBUG HIỂN THỊ TRÊN MÀN HÌNH
+  String _debugText = "";
+
   late html.VideoElement _videoElement;
-  bool _isProcessing = false;
   
+  // Biến này chỉ dùng để chặn xử lý chồng chéo (1 frame xử lý xong mới nhận frame tiếp)
+  bool _isProcessingFrame = false; 
+
   // Logic Mobile
   bool get _isMobile => html.window.innerWidth! < html.window.innerHeight!;
   double get _processingWidth => _isMobile ? 360 : 480;
   double get _processingHeight => _isMobile ? 480 : 360;
 
-  bool _verificationFailed = false;
   late final String _viewId;
   
-  // Biến lưu ảnh Widget để đè lên video
+  // Chỉ dùng để hiển thị ảnh khi ĐÃ THÀNH CÔNG
   Image? _capturedWidget; 
-  // Biến lưu base64
   String? _capturedBase64; 
   
   bool _areModelsLoaded = false;
   bool _isSuccess = false; 
+  
+  // Chỉ hiện nút thử lại khi có lỗi kỹ thuật (Camera, Model), không phải lỗi do mặt sai
+  bool _isTechnicalError = false;
 
   @override
   void initState() {
     super.initState();
-    
-    // Cập nhật trạng thái ban đầu theo chế độ
     String modeName = widget.attendanceMode == 0 ? "VÀO" : "RA";
-    _status = 'Đang chuẩn bị chấm công $modeName...';
+    _status = 'Chấm công $modeName...';
 
     _viewId = 'video-view-ver-${DateTime.now().millisecondsSinceEpoch}';
     _videoElement = html.VideoElement()
@@ -132,131 +109,158 @@ class _VerificationPageState extends State<VerificationPage> {
   @override
   void dispose() {
     stopRealtimeDetection();
-    _stopCameraStream(); 
+    try { _videoElement.srcObject?.getTracks().forEach((track) => track.stop()); } catch (e) {}
     super.dispose();
-  }
-
-  void _stopCameraStream() {
-    try {
-      if (_videoElement.srcObject != null) {
-        _videoElement.srcObject?.getTracks().forEach((track) => track.stop());
-        _videoElement.srcObject = null;
-      }
-    } catch (e) {
-      print("Lỗi tắt camera: $e");
-    }
   }
   
   Future<void> _initializeAndStartVerification() async {
-    if (_isProcessing) return;
     setState(() {
-      _isProcessing = true;
-      _status = 'Đang tải model nhận dạng...';
+      _isProcessingFrame = true; // Chặn tạm thời
+      _status = 'Đang tải dữ liệu...';
     });
     
     _areModelsLoaded = await loadModels();
     
     if (!mounted) return;
-    
     if (!_areModelsLoaded) {
       setState(() {
-        _status = 'Lỗi! Không thể tải model nhận dạng.';
-        _verificationFailed = true;
-        _isProcessing = false;
+        _status = 'Lỗi! Không thể tải AI.';
+        _isTechnicalError = true;
+        _isProcessingFrame = false;
       });
       return;
     }
     
-    setState(() => _isProcessing = false);
+    // Mở khóa
+    setState(() => _isProcessingFrame = false);
     _startVerificationProcess();
   }
   
+  // --- HÀM KHỞI ĐỘNG ---
   Future<void> _startVerificationProcess() async {
-    if (_isProcessing) return;
-    
     if (_videoElement.srcObject != null) {
        try { _videoElement.play(); } catch(e) {}
     }
 
     setState(() {
-      _isProcessing = true;
-      _verificationFailed = false;
+      _isTechnicalError = false; 
       _isSuccess = false;
-      _capturedWidget = null;
+      _isProcessingFrame = false; // Sẵn sàng nhận Frame
+      _capturedWidget = null; 
       _capturedBase64 = null;
+      _statusColor = Colors.black;
+      _status = "Đưa mặt vào khung tròn...";
+      _debugText = "";
     });
 
     if (!mounted) return;
-    _startFaceRecognition();
+    _runRealtimeLoop();
   }
 
-  Future<void> _startFaceRecognition() async {
+  Future<void> _runRealtimeLoop() async {
     if (_isSuccess) return;
 
-    final onFaceDetected = jsutil.allowInterop((dynamic result) async {
-      if (!mounted || !_isProcessing) return;
-      if (_isSuccess) return; 
-      
-      if (_capturedBase64 != null) return;
+    final onVectorDetected = jsutil.allowInterop((dynamic descriptorJS) async {
+      // Nếu đang xử lý frame trước, hoặc đã xong, hoặc lỗi kỹ thuật -> Bỏ qua frame này
+      if (!mounted || _isSuccess || _isProcessingFrame || _isTechnicalError) return;
 
-      if (result != null) {
-        // --- LOGIC FIX IPHONE (SEQUENCE LOCKING) ---
-        stopRealtimeDetection();
-        _captureFrameAndShow();
-        await Future.delayed(const Duration(milliseconds: 100));
-        
-        setState(() {
-          _status = 'Đang so sánh...';
-        });
-        
-        try {
-          bool isMatch = await _verifyFace().timeout(const Duration(seconds: 10));
-          if (!mounted) return;
-          
-          if (!isMatch) {
-            if (!_verificationFailed && !_isSuccess) {
-              setState(() => _status = 'Không khớp. Đang thử lại...');
-              
-              await Future.delayed(const Duration(seconds: 2));
-              
-              if (mounted && !_isSuccess) {
-                  setState(() {
-                    _capturedWidget = null;
-                    _capturedBase64 = null;
-                  });
-                  _startFaceRecognition(); 
-              }
-            }
-          }
-        } on TimeoutException {
-          if (mounted && !_isSuccess) {
-            print("Timeout 10s. Chấp nhận kết quả.");
-            await _markCheckInSuccessful();
-          }
-        }
+      if (descriptorJS != null) {
+        // === CÓ VECTOR TỪ JS TRẢ VỀ ===
+        _processVector(descriptorJS);
+      } else {
+        // JS vẫn đang chạy nhưng chưa bắt được mặt (hoặc mặt chưa rõ)
+        // Ta chỉ cập nhật trạng thái nhẹ nhàng, KHÔNG DỪNG
+        // setState(() => _status = "Đang tìm khuôn mặt...");
       }
     });
 
-    final cameraStarted = await startCamera(_viewId, onFaceDetected, jsutil.allowInterop(() {}));
+    final cameraStarted = await startCamera(_viewId, onVectorDetected, jsutil.allowInterop(() {}));
     
     if (!mounted) return;
     if (_isSuccess) return; 
 
-    if (cameraStarted) {
-      String modeName = widget.attendanceMode == 0 ? "VÀO" : "RA";
-      setState(() => _status = 'Đưa khuôn mặt vào khung tròn để CHẤM $modeName...');
-    } else {
+    if (!cameraStarted) {
       setState(() {
-        _status = 'Lỗi không thể truy cập camera.';
-        _verificationFailed = true;
-        _isProcessing = false;
+        _status = 'Lỗi Camera.';
+        _isTechnicalError = true;
       });
     }
   }
 
+  // --- XỬ LÝ VECTOR (LIÊN TỤC) ---
+  void _processVector(dynamic descriptorJS) async {
+    // Khóa lại để xử lý frame này
+    setState(() => _isProcessingFrame = true);
+
+    try {
+      // 1. Parse Vector
+      final List<double> currentVector = (jsutil.dartify(descriptorJS) as List)
+          .map((e) => (e as num).toDouble())
+          .toList();
+
+      if (widget.currentUser.faceDescriptor == null) {
+         setState(() {
+            _status = "Lỗi: User chưa có dữ liệu gốc.";
+            _isTechnicalError = true;
+         });
+         return;
+      }
+
+      // 2. So sánh
+      final distance = _calculateDistance(widget.currentUser.faceDescriptor!, currentVector);
+      
+      // Cập nhật Debug Info (Real-time)
+      setState(() => _debugText = "Sai số: ${distance.toStringAsFixed(3)}");
+
+      // 3. Kiểm tra kết quả
+      if (distance < 0.5) {
+        // === KHỚP ===
+        // CHỈ DỪNG KHI KHỚP
+        _isSuccess = true;
+        stopRealtimeDetection(); // Dừng JS
+        
+        // Chụp một bức ảnh cuối cùng để làm bằng chứng (nếu cần) và để UI đẹp
+        _captureFrameAndShow();
+
+        setState(() {
+           _status = "Khớp (${distance.toStringAsFixed(2)})! Đang chấm công...";
+           _statusColor = Colors.blue;
+        });
+        
+        // Gọi API
+        final success = await ApiService().saveCheckIn(widget.currentUser.userId, widget.attendanceMode);
+        
+        if (!mounted) return;
+
+        if (success) {
+           _handleSuccess(); 
+        } else {
+           // Lỗi Server -> Dừng lại báo lỗi
+           setState(() {
+             _status = "Lỗi kết nối Server.";
+             _isTechnicalError = true; 
+             _isSuccess = false; // Reset success để cho phép thử lại
+           });
+        }
+
+      } else {
+        // === KHÔNG KHỚP ===
+        // QUAN TRỌNG: KHÔNG DỪNG LẠI.
+        // Chỉ hiện thông báo và MỞ KHÓA để nhận frame tiếp theo ngay lập tức
+        setState(() {
+          _status = "Chưa khớp... Đang quét tiếp";
+          _statusColor = Colors.orange;
+          _isProcessingFrame = false; // MỞ KHÓA NGAY
+        });
+      }
+
+    } catch (e) {
+      print("Lỗi xử lý vector: $e");
+      setState(() => _isProcessingFrame = false); // Mở khóa nếu lỗi
+    }
+  }
+
   void _captureFrameAndShow() {
-    if (_isSuccess) return;
-    
     final int canvasW = _processingWidth.toInt();
     final int canvasH = _processingHeight.toInt();
     final canvas = html.CanvasElement(width: canvasW, height: canvasH);
@@ -265,28 +269,8 @@ class _VerificationPageState extends State<VerificationPage> {
     ctx.translate(canvasW, 0);
     ctx.scale(-1, 1);
 
-    final videoW = _videoElement.videoWidth;
-    final videoH = _videoElement.videoHeight;
-    final double videoAspect = videoW / videoH;
-    final double canvasAspect = canvasW / canvasH;
-    
-    double renderW, renderH, offsetX, offsetY;
-
-    if (videoAspect > canvasAspect) {
-      renderH = videoH.toDouble();
-      renderW = videoH * canvasAspect;
-      offsetX = (videoW - renderW) / 2;
-      offsetY = 0;
-    } else {
-      renderW = videoW.toDouble();
-      renderH = videoW / canvasAspect;
-      offsetX = 0;
-      offsetY = (videoH - renderH) / 2;
-    }
-
-    ctx.drawImageScaledFromSource(
-      _videoElement, offsetX, offsetY, renderW, renderH, 0, 0, canvasW, canvasH
-    );
+    // Vẽ video hiện tại vào canvas
+    ctx.drawImageScaled(_videoElement, 0, 0, canvasW, canvasH);
 
     final imgData = canvas.toDataUrl('image/jpeg', 0.9);
     
@@ -295,126 +279,36 @@ class _VerificationPageState extends State<VerificationPage> {
       _capturedWidget = Image.network(imgData, fit: BoxFit.fill, gaplessPlayback: true);
     });
   }
-  
-  Future<void> _markCheckInSuccessful() async {
-    if (_isSuccess) return; 
-
-    // Vẫn chụp ảnh (để lấy base64 nếu cần debug hoặc gửi sau) 
-    // dù API mới không bắt buộc gửi ảnh, nhưng logic chụp ảnh giúp UI mượt
-    String imageToSend = _capturedBase64 ?? "";
-    if (imageToSend.isEmpty) {
-        try {
-           final canvas = html.CanvasElement(width: _processingWidth.toInt(), height: _processingHeight.toInt());
-           final ctx = canvas.getContext('2d') as html.CanvasRenderingContext2D;
-           ctx.drawImageScaled(_videoElement, 0, 0, _processingWidth, _processingHeight);
-           imageToSend = canvas.toDataUrl('image/jpeg', 0.9);
-        } catch(e) {}
-    }
-
-    setState(() => _status = "Đang gửi dữ liệu chấm công...");
-    
-    // GỌI API MỚI VỚI STATUS
-    final success = await ApiService().saveCheckIn(widget.currentUser.userId, widget.attendanceMode);
-    
-    if (!mounted) return;
-
-    if (success) {
-       _handleSuccess();
-    } else {
-       setState(() {
-         _status = "CHẤM CÔNG THẤT BẠI!\n(Lỗi khi gửi dữ liệu về server)";
-         _verificationFailed = true;
-       });
-    }
-    
-    if (mounted) {
-      setState(() => _isProcessing = false);
-    }
-  }
 
   void _handleSuccess() async {
-      _isSuccess = true; 
-      stopRealtimeDetection();
-      _stopCameraStream();
-
-      if (mounted) {
-        String modeName = widget.attendanceMode == 0 ? "VÀO" : "RA";
-        setState(() {
+      if (!mounted) return;
+      
+      String modeName = widget.attendanceMode == 0 ? "VÀO" : "RA";
+      setState(() {
            _status = "CHẤM CÔNG $modeName THÀNH CÔNG!";
-           _isProcessing = false; 
-        });
-      }
+           _statusColor = Colors.green;
+      });
+      
+      // Tắt camera
+      try { _videoElement.srcObject?.getTracks().forEach((track) => track.stop()); } catch(e){}
 
       await Future.delayed(const Duration(seconds: 2));
       if (mounted) closeWindow(); 
   }
-
-  Future<bool> _verifyFace() async {
-    final completer = Completer<FaceProcessingResult>();
-    if (_capturedBase64 != null) {
-        _handleFaceProcessing(_capturedBase64!, (result) => completer.complete(result));
-    } else {
-        return false;
-    }
-
-    final result = await completer.future;
-    if (!mounted) return false;
-    if (_isSuccess) return true;
-
-    if (result.descriptor != null && widget.currentUser.faceDescriptor != null) {
-      final distance = _calculateDistance(widget.currentUser.faceDescriptor!, result.descriptor!);
-      
-      if (distance == double.maxFinite) return false;
-      
-      // Ngưỡng 0.5 (Độ khó bạn đã chọn)
-      if (distance < 0.5) { 
-        setState(() => _status = "Khuôn mặt khớp! Đang gửi...");
-        
-        // GỌI API MỚI
-        final success = await ApiService().saveCheckIn(widget.currentUser.userId, widget.attendanceMode);
-        
-        if (!mounted) return false;
-        
-        if (success) {
-           _handleSuccess(); 
-           return true; 
-        } else {
-           setState(() {
-             _status = "Lỗi kết nối Server.";
-             _verificationFailed = true;
-             _isProcessing = false;
-           });
-           return false;
-        }
-      } else {
-        return false;
-      }
-    } else {
-      return false;
-    }
-  }
-  
-  void _handleFaceProcessing(String imageBase64, Function(FaceProcessingResult) onResult) {
-    final callbackObject = FaceApiCallback((List<double>? descriptor) {
-      onResult(FaceProcessingResult(descriptor: descriptor, imageBase64: imageBase64));
-    });
-    getFaceDescriptor(imageBase64, jsutil.createDartExport(callbackObject));
-  }
   
   double _calculateDistance(List<double> v1, List<double> v2) {
-    const int descriptorLength = 128;
-    if (v1.length < descriptorLength || v2.length < descriptorLength) return double.maxFinite; 
+    if (v1.length != v2.length) return 10.0;
     double sum = 0.0;
-    for (int i = 0; i < descriptorLength; i++) {
-      sum += pow((v1[i] - v2[i]), 2);
+    for (int i = 0; i < v1.length; i++) {
+      sum += math.pow((v1[i] - v2[i]), 2);
     }
-    return sqrt(sum);
+    return math.sqrt(sum);
   }
 
   @override
   Widget build(BuildContext context) {
-    final bool showCameraView = _areModelsLoaded && !_isSuccess;
-    final bool showLoading = !_areModelsLoaded;
+    // Chỉ ẩn video khi ĐÃ THÀNH CÔNG hoặc có lỗi kỹ thuật
+    final bool showCameraView = _areModelsLoaded && !_isSuccess && !_isTechnicalError;
     
     return Scaffold(
       appBar: AppBar(title: Text('Chấm công: ${widget.currentUser.userName}')),
@@ -429,33 +323,34 @@ class _VerificationPageState extends State<VerificationPage> {
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
+                    // Video luôn chạy cho đến khi thành công
                     Offstage(
                       offstage: !showCameraView, 
                       child: HtmlElementView(viewType: _viewId),
                     ),
 
-                    if (_capturedWidget != null && !_isSuccess)
+                    // Chỉ hiện ảnh tĩnh khi đã thành công
+                    if (_capturedWidget != null && (_isSuccess || _isTechnicalError))
                       Positioned.fill(child: _capturedWidget!),
 
-                    if (!showCameraView && !_isSuccess && _capturedWidget == null)
+                    if (!showCameraView && !_isSuccess && !_isTechnicalError)
                       Container(
                         decoration: BoxDecoration(color: Colors.grey[300]),
-                        child: Center(
-                          child: const CircularProgressIndicator(),
-                        ),
+                        child: Center(child: const CircularProgressIndicator()),
                       ),
                     
-                    // KHUNG TRÒN
+                    // Khung tròn quét
                     if (showCameraView)
                       Center(
                         child: Container(
-                          width: _processingWidth * 0.8,
-                          height: _processingHeight * 0.8,
+                          width: _processingWidth * 0.85,
+                          height: _processingHeight * 0.85,
                           decoration: BoxDecoration(
                             shape: BoxShape.circle, 
                             border: Border.all(
-                                color: _capturedWidget != null ? Colors.green : Colors.yellow, 
-                                width: 4
+                                // Màu vàng: Đang quét | Màu xanh: Khớp
+                                color: _isProcessingFrame ? Colors.blue : Colors.yellow, 
+                                width: 8
                             ),
                           ),
                         ),
@@ -479,17 +374,18 @@ class _VerificationPageState extends State<VerificationPage> {
               padding: const EdgeInsets.symmetric(horizontal: 16.0),
               child: Column( 
                 children: [ 
-                  if (_isProcessing && !_verificationFailed && !_isSuccess) const CircularProgressIndicator(),
-                  const SizedBox(height: 8),
                   Text(
                     _status, 
                     style: TextStyle(
                       fontSize: 18, 
                       fontWeight: FontWeight.bold,
-                      color: _isSuccess ? Colors.green : Colors.black
+                      color: _isSuccess ? Colors.green : _statusColor 
                     ), 
                     textAlign: TextAlign.center
                   ),
+                  // Hiển thị sai số thực tế (nếu có)
+                  if (_debugText.isNotEmpty && !_isSuccess)
+                    Text(_debugText, style: TextStyle(fontSize: 12, color: Colors.grey)),
                 ],
               ),
             ),
@@ -503,23 +399,21 @@ class _VerificationPageState extends State<VerificationPage> {
                   icon: const Icon(Icons.exit_to_app),
                   label: const Text('Đóng Tab Ngay'),
                   onPressed: () => closeWindow(), 
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.grey[700],
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 12),
-                  ),
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.grey[700], foregroundColor: Colors.white),
                 ),
               ),
 
-            if(_verificationFailed)
+            // Nút Thử Lại chỉ hiện khi có LỖI KỸ THUẬT
+            if(_isTechnicalError)
               ElevatedButton.icon(
                 icon: const Icon(Icons.refresh),
-                label: const Text('Thử Lại Chấm Công'),
-                onPressed: _isProcessing ? null : _initializeAndStartVerification,
+                label: const Text('THỬ LẠI'),
+                onPressed: _startVerificationProcess, 
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.orange,
+                  foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 20),
-                  textStyle: const TextStyle(fontSize: 18),
+                  textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                 ),
               ),
 

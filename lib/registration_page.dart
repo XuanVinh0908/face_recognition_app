@@ -8,9 +8,9 @@ import 'package:js/js.dart';
 import 'package:js/js_util.dart' as jsutil;
 import 'models.dart';
 import 'api_service.dart';
-import 'version_info.dart'; // Import file version
+import 'version_info.dart';
 
-// --- KHAI BÁO JS INTEROP (CHỈ GIỮ LẠI CÁI CẦN THIẾT) ---
+// --- KHAI BÁO JS ---
 @JS()
 external void getFaceDescriptor(String imageBase64, Object callback);
 
@@ -20,16 +20,13 @@ external void stopRealtimeDetection();
 @JS() 
 external void closeWindow(); 
 
-// --- CÁC HÀM WRAPPER GỌI JS AN TOÀN (GIỐNG TRANG CHẤM CÔNG) ---
+// --- WRAPPERS ---
 Future<bool> loadModels() async {
   try {
     final promise = jsutil.callMethod(html.window, 'loadModels', []);
     await jsutil.promiseToFuture(promise); 
     return true;
-  } catch (e) {
-    print("Dart Error loading models: $e");
-    return false;
-  }
+  } catch (e) { return false; }
 }
 
 Future<bool> startCamera(String videoElementId, Function onFaceDetected, Function onBlinkDetected) async {
@@ -41,10 +38,7 @@ Future<bool> startCamera(String videoElementId, Function onFaceDetected, Functio
     ]);
     await jsutil.promiseToFuture(promise);
     return true;
-  } catch (e) {
-    print("Dart Error starting camera: $e");
-    return false;
-  }
+  } catch (e) { return false; }
 }
 
 @JSExport()
@@ -76,22 +70,28 @@ class RegistrationPage extends StatefulWidget {
 class _RegistrationPageState extends State<RegistrationPage> {
   final String _displayVersion = appVersion;
   String _status = 'Vui lòng chọn phương thức đăng ký...';
+  Color _statusColor = Colors.black;
+
   late html.VideoElement _videoElement;
-  bool _isProcessing = false;
   late final String _viewId;
 
-  // --- LOGIC MOBILE & KÍCH THƯỚC ĐỘNG ---
+  // Logic Mobile
   bool get _isMobile => html.window.innerWidth! < html.window.innerHeight!;
   double get _processingWidth => _isMobile ? 360 : 480;
   double get _processingHeight => _isMobile ? 480 : 360;
 
   // Biến trạng thái
-  bool _showCamera = false;
-  String? _uploadedImageBase64;
-  String? _capturedCameraBase64; // Chỉ lưu base64, không cần Image widget
-  
+  bool _showCamera = false;      // Đang ở chế độ Camera hay Upload
+  bool _isBlocking = false;      // Cờ chặn (đang xử lý)
+  bool _registrationFailed = false; // Hiện nút thử lại
+  bool _isSuccess = false;
+
+  // Dữ liệu
+  String? _uploadedImageBase64;  // Ảnh từ thư viện
+  String? _capturedBase64;       // Ảnh chụp từ camera
+  Image? _capturedWidget;        // Widget ảnh để hiển thị đè lên video
+
   bool _areModelsLoaded = false;
-  bool _cameraStarted = false;
 
   @override
   void initState() {
@@ -105,7 +105,6 @@ class _RegistrationPageState extends State<RegistrationPage> {
       ..setAttribute('webkit-playsinline', 'true')
       ..style.transform = 'scaleX(-1)'; 
       
-      // CSS Cover chuẩn
       _videoElement.style.objectFit = 'cover'; 
       _videoElement.style.width = '100%';
       _videoElement.style.height = '100%';
@@ -116,111 +115,214 @@ class _RegistrationPageState extends State<RegistrationPage> {
   @override
   void dispose() {
     stopRealtimeDetection();
-    _stopCameraStream();
+    try { _videoElement.srcObject?.getTracks().forEach((track) => track.stop()); } catch(e){}
     super.dispose();
-  }
-
-  void _stopCameraStream() {
-    try {
-      if (_videoElement.srcObject != null) {
-        _videoElement.srcObject?.getTracks().forEach((track) => track.stop());
-        _videoElement.srcObject = null;
-      }
-    } catch (e) {
-      print("Lỗi tắt camera: $e");
-    }
-  }
-
-  Future<bool> _ensureModelsLoaded() async {
-    if (_areModelsLoaded) return true;
-    setState(() {
-      _isProcessing = true;
-      _status = 'Đang tải model nhận dạng...';
-    });
-    
-    _areModelsLoaded = await loadModels();
-    
-    if (!mounted) return false;
-
-    if (!_areModelsLoaded) {
-      setState(() {
-        _status = 'Lỗi! Không thể tải model nhận dạng.';
-        _isProcessing = false;
-      });
-      return false;
-    }
-    return true;
   }
 
   // --- CHUYỂN ĐỔI CHẾ ĐỘ ---
   Future<void> _setMode(bool useCamera) async {
-    if (_isProcessing) return;
+    if (_isBlocking) return;
 
-    final modelsLoaded = await _ensureModelsLoaded();
-    if (!modelsLoaded) return;
+    // Tải model trước nếu chưa tải
+    if (!_areModelsLoaded) {
+      setState(() => _status = "Đang tải Model...");
+      bool loaded = await loadModels();
+      if (!loaded) {
+        setState(() {
+           _status = "Lỗi tải AI.";
+           _statusColor = Colors.red;
+        });
+        return;
+      }
+      _areModelsLoaded = true;
+    }
 
     setState(() {
       _showCamera = useCamera;
-      _uploadedImageBase64 = null;
-      _capturedCameraBase64 = null;
       _status = useCamera ? 'Đang khởi tạo camera...' : 'Vui lòng chọn ảnh từ thư viện...';
-      _isProcessing = false; 
+      _statusColor = Colors.black;
+      
+      // Reset các biến dữ liệu
+      _uploadedImageBase64 = null;
+      _capturedBase64 = null;
+      _capturedWidget = null;
+      _isSuccess = false;
+      _registrationFailed = false;
+      _isBlocking = false;
     });
 
     if (useCamera) {
-      await _initializeCamera();
+      _startCameraScan();
     } else {
       stopRealtimeDetection();
-      _stopCameraStream();
-      _cameraStarted = false;
+      try { _videoElement.pause(); } catch(e){}
     }
   }
 
-  // --- LOGIC CAMERA (ĐÃ CẬP NHẬT THEO VERIFICATION PAGE) ---
-  Future<void> _initializeCamera() async {
-    if (_cameraStarted) {
-       // Nếu đang pause thì play lại
-       if (_videoElement.paused) _videoElement.play();
-       setState(() => _status = 'Vui lòng đưa khuôn mặt vào khung hình bầu dục...');
-       return;
+  // --- 1. LOGIC CAMERA (GIỐNG TRANG CHẤM CÔNG) ---
+  Future<void> _startCameraScan() async {
+    if (_videoElement.srcObject != null) {
+       try { _videoElement.play(); } catch(e) {}
     }
 
-    final onFaceDetected = jsutil.allowInterop((dynamic result) {
-      if (!mounted || _isProcessing || !_showCamera) return;
-      if (result != null) {
-        // 1. Dừng hình video (Tạo cảm giác chụp mượt)
-        _videoElement.pause();
+    setState(() {
+      _isSuccess = false;
+      _registrationFailed = false;
+      _isBlocking = false;
+      _capturedWidget = null;
+      _capturedBase64 = null;
+      _status = "Đưa mặt vào khung tròn...";
+      _statusColor = Colors.black;
+    });
+
+    if (!mounted) return;
+
+    // Callback nhận Vector từ JS
+    final onVectorDetected = jsutil.allowInterop((dynamic descriptorJS) async {
+      if (!mounted || _isSuccess || _isBlocking || _registrationFailed) return;
+
+      if (descriptorJS != null) {
+        // BẮT ĐẦU XỬ LÝ
+        _isBlocking = true; 
         
-        // 2. Cắt ảnh ngầm (Crop chính xác)
-        _captureCameraFrame();
+        setState(() => _status = "Giữ nguyên khuôn mặt...");
+        await Future.delayed(const Duration(milliseconds: 500)); // Ổn định
         
-        stopRealtimeDetection();
-        
-        setState(() => _status = "Đã chụp ảnh. Đang xử lý...");
-        
-        // 3. Tiến hành đăng ký
-        _registerFaceFromCamera();
+        if (!mounted || _isSuccess) return;
+
+        stopRealtimeDetection(); 
+        _captureFrameAndShow();
+        await Future.delayed(const Duration(milliseconds: 100));
+
+        setState(() => _status = "Đang đăng ký...");
+
+        // Convert Vector
+        try {
+          final List<double> vector = (jsutil.dartify(descriptorJS) as List)
+              .map((e) => (e as num).toDouble())
+              .toList();
+              
+          // Gọi API Đăng ký
+          await _registerLogic(vector, _capturedBase64!);
+
+        } catch (e) {
+           setState(() {
+             _status = "Lỗi xử lý vector.";
+             _statusColor = Colors.red;
+             _registrationFailed = true;
+             _isBlocking = false;
+           });
+        }
       }
     });
 
-    final onBlinkDetected = jsutil.allowInterop((){});
-
-    final success = await startCamera(_viewId, onFaceDetected, onBlinkDetected);
+    final cameraStarted = await startCamera(_viewId, onVectorDetected, jsutil.allowInterop(() {}));
     
     if (!mounted) return;
-    if (success) {
-      _cameraStarted = true;
-      setState(() => _status = 'Vui lòng đưa khuôn mặt vào khung hình bầu dục...');
-    } else {
-      setState(() => _status = 'Lỗi không thể truy cập camera.');
+    if (!cameraStarted) {
+      setState(() {
+        _status = 'Lỗi Camera.';
+        _statusColor = Colors.red;
+      });
     }
   }
 
-  // --- HÀM CẮT ẢNH CHUẨN (OBJECT-FIT: COVER) ---
-  void _captureCameraFrame() {
+  // --- 2. LOGIC UPLOAD ẢNH ---
+  Future<void> _pickImage() async {
+    if (_isBlocking) return;
+    
+    final html.FileUploadInputElement uploadInput = html.FileUploadInputElement();
+    uploadInput.accept = 'image/*';
+    uploadInput.click();
+
+    uploadInput.onChange.listen((e) {
+      if (uploadInput.files!.isEmpty) return;
+      
+      setState(() {
+         _isBlocking = true;
+         _status = "Đang xử lý ảnh...";
+      });
+
+      final file = uploadInput.files![0];
+      final reader = html.FileReader();
+
+      reader.readAsDataUrl(file);
+      reader.onLoadEnd.listen((e) {
+        final base64 = reader.result as String;
+        setState(() => _uploadedImageBase64 = base64);
+        
+        // Gửi đi lấy vector
+        _processUploadedImage(base64);
+      });
+    });
+  }
+
+  Future<void> _processUploadedImage(String base64) async {
+    final completer = Completer<List<double>?>();
+    
+    final callbackObject = FaceApiCallback((List<double>? descriptor) {
+      completer.complete(descriptor);
+    });
+    
+    getFaceDescriptor(base64, jsutil.createDartExport(callbackObject));
+    
+    try {
+       final descriptor = await completer.future;
+       
+       if (descriptor != null) {
+          // Có vector -> Gọi API đăng ký
+          await _registerLogic(descriptor, base64);
+       } else {
+          setState(() {
+             _status = "Không tìm thấy khuôn mặt trong ảnh.";
+             _statusColor = Colors.red;
+             _isBlocking = false;
+          });
+       }
+    } catch (e) {
+       setState(() {
+          _status = "Lỗi xử lý ảnh.";
+          _statusColor = Colors.red;
+          _isBlocking = false;
+       });
+    }
+  }
+
+  // --- HÀM GỌI API ĐĂNG KÝ CHUNG ---
+  Future<void> _registerLogic(List<double> vector, String imageBase64) async {
+      setState(() => _status = "Đang gửi dữ liệu lên Server...");
+      
+      final success = await ApiService().registerFaceAndLocation(
+          widget.currentUser.userId, 
+          vector, 
+          imageBase64
+      );
+
+      if (!mounted) return;
+
+      if (success) {
+        setState(() {
+           _isSuccess = true;
+           _status = "ĐĂNG KÝ THÀNH CÔNG!";
+           _statusColor = Colors.green;
+           _isBlocking = false;
+        });
+        await Future.delayed(const Duration(seconds: 2));
+        if (mounted) closeWindow();
+      } else {
+        setState(() {
+           _status = "Đăng ký thất bại (Lỗi Server).";
+           _statusColor = Colors.red;
+           _registrationFailed = true; // Hiện nút thử lại (cho camera)
+           _isBlocking = false;
+        });
+      }
+  }
+
+  // --- HÀM CẮT ẢNH TỪ VIDEO ---
+  void _captureFrameAndShow() {
     final int canvasW = _processingWidth.toInt();
     final int canvasH = _processingHeight.toInt();
-    
     final canvas = html.CanvasElement(width: canvasW, height: canvasH);
     final ctx = canvas.getContext('2d') as html.CanvasRenderingContext2D;
 
@@ -229,10 +331,11 @@ class _RegistrationPageState extends State<RegistrationPage> {
 
     final videoW = _videoElement.videoWidth;
     final videoH = _videoElement.videoHeight;
+    
+    // Logic Object-Fit: Cover
+    double renderW, renderH, offsetX, offsetY;
     final double videoAspect = videoW / videoH;
     final double canvasAspect = canvasW / canvasH;
-    
-    double renderW, renderH, offsetX, offsetY;
 
     if (videoAspect > canvasAspect) {
       renderH = videoH.toDouble();
@@ -250,96 +353,12 @@ class _RegistrationPageState extends State<RegistrationPage> {
       _videoElement, offsetX, offsetY, renderW, renderH, 0, 0, canvasW, canvasH
     );
 
-    _capturedCameraBase64 = canvas.toDataUrl('image/jpeg', 0.9);
-  }
-
-  // --- LOGIC CHỌN ẢNH TỪ THƯ VIỆN (GIỮ NGUYÊN) ---
-  Future<void> _pickImage() async {
-    if (_isProcessing) return;
-
-    final modelsLoaded = await _ensureModelsLoaded();
-    if (!modelsLoaded) return;
+    final imgData = canvas.toDataUrl('image/jpeg', 0.9);
     
-    setState(() => _isProcessing = false);
-
-    final html.FileUploadInputElement uploadInput = html.FileUploadInputElement();
-    uploadInput.accept = 'image/*';
-    uploadInput.click();
-
-    uploadInput.onChange.listen((e) {
-      if (uploadInput.files!.isEmpty) return;
-      final file = uploadInput.files![0];
-      final reader = html.FileReader();
-
-      reader.readAsDataUrl(file);
-      reader.onLoadEnd.listen((e) {
-        setState(() {
-          _uploadedImageBase64 = reader.result as String;
-          _status = 'Đã tải ảnh. Nhấn "Đăng ký" để xử lý.';
-        });
-      });
-    });
-  }
-
-  // --- CÁC HÀM XỬ LÝ ĐĂNG KÝ ---
-
-  Future<void> _registerFaceFromCamera() async {
-    if (_capturedCameraBase64 == null) return;
-    await _handleFaceProcessing(_capturedCameraBase64!, isCamera: true);
-  }
-
-  Future<void> _registerFaceFromUpload() async {
-    if (_uploadedImageBase64 == null) return;
     setState(() {
-      _isProcessing = true;
-      _status = "Đang xử lý ảnh tải lên...";
+      _capturedBase64 = imgData;
+      _capturedWidget = Image.network(imgData, fit: BoxFit.fill, gaplessPlayback: true);
     });
-    await _handleFaceProcessing(_uploadedImageBase64!, isCamera: false);
-  }
-
-  Future<void> _handleFaceProcessing(String imageBase64, {required bool isCamera}) async {
-    final completer = Completer<List<double>?>();
-    
-    final callbackObject = FaceApiCallback((List<double>? descriptor) {
-      completer.complete(descriptor);
-    });
-    
-    // Gọi hàm JS trích xuất vector
-    getFaceDescriptor(imageBase64, jsutil.createDartExport(callbackObject));
-    final descriptor = await completer.future;
-
-    if (!mounted) return;
-
-    if (descriptor != null) {
-      setState(() => _status = "Đã có dữ liệu, đang gửi về server...");
-      
-      final success = await ApiService().registerFaceAndLocation(widget.currentUser.userId, descriptor, imageBase64);
-
-      if (!mounted) return;
-      if (success) {
-        setState(() => _status = "Đăng ký thành công! Tab sẽ đóng sau 2 giây.");
-        await Future.delayed(const Duration(seconds: 2));
-        if (mounted) closeWindow();
-      } else {
-        setState(() {
-           _status = "Đăng ký thất bại: Lỗi Server.";
-           _isProcessing = false;
-           // Nếu là camera, cho phép chụp lại nhưng không tự restart ngay để user đọc lỗi
-           if(isCamera) _videoElement.play(); 
-        });
-      }
-    } else {
-      setState(() {
-        _status = "Không tìm thấy khuôn mặt rõ ràng. Vui lòng thử lại.";
-        _isProcessing = false;
-        if(isCamera) {
-            // Restart lại quy trình sau 2s
-            Future.delayed(const Duration(seconds: 2), () {
-               if(mounted && _showCamera) _initializeCamera();
-            });
-        }
-      });
-    }
   }
   
   @override
@@ -360,7 +379,7 @@ class _RegistrationPageState extends State<RegistrationPage> {
                     ElevatedButton.icon(
                       icon: const Icon(Icons.camera_alt),
                       label: const Text('Dùng Camera'),
-                      onPressed: _isProcessing ? null : () => _setMode(true),
+                      onPressed: _isBlocking ? null : () => _setMode(true),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: _showCamera ? Colors.blue : Colors.grey[700],
                         padding: const EdgeInsets.symmetric(vertical: 12),
@@ -370,7 +389,7 @@ class _RegistrationPageState extends State<RegistrationPage> {
                     ElevatedButton.icon(
                       icon: const Icon(Icons.photo_library),
                       label: const Text('Tải Ảnh Lên'),
-                      onPressed: _isProcessing ? null : () => _setMode(false),
+                      onPressed: _isBlocking ? null : () => _setMode(false),
                        style: ElevatedButton.styleFrom(
                         backgroundColor: !_showCamera ? Colors.blue : Colors.grey[700],
                         padding: const EdgeInsets.symmetric(vertical: 12),
@@ -382,30 +401,36 @@ class _RegistrationPageState extends State<RegistrationPage> {
               
               const SizedBox(height: 16),
 
-              // --- KHUNG HIỂN THỊ ---
+              // KHUNG HIỂN THỊ CAMERA
               if (_showCamera)
-                ClipRect( // Cắt gọn phần thừa
+                ClipRect(
                   child: SizedBox(
                     width: _processingWidth,
                     height: _processingHeight,
                     child: Stack(
                       fit: StackFit.expand,
                       children: [
-                        // Video (Khi chụp xong sẽ Pause, tạo cảm giác ảnh tĩnh)
-                        HtmlElementView(viewType: _viewId),
+                        // Video
+                        Offstage(
+                          offstage: false, 
+                          child: HtmlElementView(viewType: _viewId),
+                        ),
 
-                        // Khung Bầu Dục (OVAL)
+                        // Ảnh chụp
+                        if (_capturedWidget != null)
+                          Positioned.fill(child: _capturedWidget!),
+
+                        // Khung tròn (Circle)
                         Center(
                           child: Container(
-                            width: _processingWidth * 0.6,
-                            height: _processingHeight * 0.8,
-                            decoration: ShapeDecoration(
-                              shape: OvalBorder(
-                                side: BorderSide(
-                                  // Xanh khi pause (chụp xong), Vàng khi đang tìm
-                                  color: _videoElement.paused ? Colors.green : Colors.yellow,
-                                  width: 4,
-                                ),
+                            width: _processingWidth * 0.85,
+                            height: _processingHeight * 0.85,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle, 
+                              border: Border.all(
+                                  // Xanh: OK/Đang chặn, Vàng: Đang tìm, Đỏ: Lỗi
+                                  color: _isSuccess ? Colors.green : (_registrationFailed ? Colors.red : Colors.yellow), 
+                                  width: 8
                               ),
                             ),
                           ),
@@ -415,6 +440,7 @@ class _RegistrationPageState extends State<RegistrationPage> {
                   ),
                 ),
               
+              // KHUNG HIỂN THỊ UPLOAD
               if (!_showCamera)
                 Container(
                   width: _processingWidth,
@@ -433,7 +459,7 @@ class _RegistrationPageState extends State<RegistrationPage> {
                              ElevatedButton.icon(
                                icon: const Icon(Icons.upload_file),
                                label: const Text('Bấm để chọn ảnh...'),
-                               onPressed: _isProcessing ? null : _pickImage,
+                               onPressed: _isBlocking ? null : _pickImage,
                              )
                           ],
                         )
@@ -444,13 +470,14 @@ class _RegistrationPageState extends State<RegistrationPage> {
                       ),
                 ),
               
-              if (!_showCamera && _uploadedImageBase64 != null)
+              // NÚT ĐĂNG KÝ (CHỈ HIỆN KHI UPLOAD VÀ CÓ ẢNH)
+              if (!_showCamera && _uploadedImageBase64 != null && !_isSuccess)
                 Padding(
                   padding: const EdgeInsets.only(top: 16.0),
                   child: ElevatedButton.icon(
-                    icon: const Icon(Icons.app_registration),
-                    label: const Text('Bắt Đầu Đăng Ký Bằng Ảnh'),
-                    onPressed: _isProcessing ? null : _registerFaceFromUpload,
+                    icon: const Icon(Icons.check),
+                    label: const Text('Xác nhận đăng ký ảnh này'),
+                    onPressed: _isBlocking ? null : () => _processUploadedImage(_uploadedImageBase64!),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.green,
                       padding: const EdgeInsets.symmetric(vertical: 12),
@@ -458,28 +485,45 @@ class _RegistrationPageState extends State<RegistrationPage> {
                   ),
                 ),
 
-              // TRẠNG THÁI
               const SizedBox(height: 20),
-              _isProcessing 
+              
+              // TRẠNG THÁI
+              _isBlocking 
                 ? Column(children: [
-                    if(!_status.contains("thành công")) const CircularProgressIndicator(),
+                    const CircularProgressIndicator(),
                     const SizedBox(height: 8), 
-                    Text(_status, textAlign: TextAlign.center, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold))
+                    Text(_status, textAlign: TextAlign.center, style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: _statusColor))
                   ])
-                : Text(_status, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold), textAlign: TextAlign.center),
+                : Text(_status, style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: _statusColor), textAlign: TextAlign.center),
 
               const SizedBox(height: 30),
-              ElevatedButton.icon(
-                icon: const Icon(Icons.close),
-                label: const Text('Đóng Tab'),
-                onPressed: _isProcessing ? null : () => closeWindow(),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.grey[600],
-                  padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 15),
-                ),
-              ),
               
-              // HIỂN THỊ VERSION
+              if (_isSuccess)
+                  ElevatedButton.icon(
+                    icon: const Icon(Icons.exit_to_app),
+                    label: const Text('Đóng Tab Ngay'),
+                    onPressed: () => closeWindow(), 
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.grey[700],
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 15),
+                    ),
+                  ),
+
+              // NÚT THỬ LẠI (CHO CAMERA)
+              if (_registrationFailed && _showCamera)
+                  ElevatedButton.icon(
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('THỬ LẠI'),
+                    onPressed: _startCameraScan, 
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.orange,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 20),
+                      textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+              
               const SizedBox(height: 20),
               Text(
                 _displayVersion,
